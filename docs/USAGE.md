@@ -69,15 +69,36 @@ Server options (`serve/fns_server.py`):
 | `--expert-profile` | none | Routing profile for the hybrid expert cache (`.route`) |
 | `--rebalance` | `0` | Rebalance the expert cache every N tokens. Same output bits; `0` is static |
 | `--spec` | `3` | Speculative verification window (prompt lookup). Same tokens as sequential decoding. `0` disables |
+| `--spec-sample` | native auto: `min(2, --spec)` | Sampled-request verification width; explicit `0` disables, otherwise `2..--spec` |
 | `--kv-global` | `f16` | `q8_0` is opt-in and changes the bits (see below) |
 | `--fa-int8`, `--fa-swa`, `--attention-mma` | off | Opt-in flags that change the bits (see below) |
 | `--engine` | `build\fns-serve.exe` | Engine binary, for A/B comparisons |
 | `--vocab` | `FNS_MODELS\prof\flint-vocab.json` | Vocabulary for grammar constraints |
 | `--log` | none | JSON-lines log, one line per request |
+| `--log-tokens` | off | Requires `--log`; includes generated token IDs only in the private local log |
 | `--record` | none | Records each request body as JSON lines, for `bench/scripts/agent_replay.py` |
 
-`--spec` takes 2 to 8, and `0` disables it. `fns_server.py` passes it to `fns-serve` as the verification window for greedy
-requests. Sampled requests use the engine default `min(2, --spec)`; `fns_server.py` does not expose `--spec-sample`.
+`--spec` takes 2 to 8, and `0` disables it. `--spec-sample` may explicitly disable sampled speculation with `0`
+or select a width from 2 through `--spec`. Omitting it preserves the native automatic setting `min(2, --spec)`.
+For a fixed benchmark configuration, pass both values explicitly; do not change ordinary serving defaults.
+
+### Request cache control and private diagnostics
+
+Chat requests accept the strict JSON boolean `cache_prompt`, default `true`. With `false`, the native engine
+forces reused prefix length to zero and prefills the full prompt, even after a previous warmup. This does not
+remove the current prompt from speculative lookup. Strings such as `"false"`, integers and null are not booleans.
+The normal `true` default retains existing prefix reuse.
+
+An optional `X-Request-ID` header (`[A-Za-z0-9._:-]{1,128}`) correlates requests with `--log`; it is local log
+metadata, not a new public response field. The completed-request JSONL includes prompt/completion counts,
+`reused_prefix`, native finish reason, `prefill_ms`, `decode_ms`, `spec_windows`, `spec_drafted`,
+`spec_accepted`, `spec_emitted` and `decode_iterations`. FNS prefill timing includes selection of the first
+token; decode timing begins after that selection. Neither is visible HTTP TTFT.
+
+Use `--log-tokens` only when exact output-token auditing is needed. It requires `--log` and adds `token_ids`
+to that file, never to the HTTP response. The log is flushed before terminal SSE. Logs, recorded requests
+and generated token IDs can contain sensitive or licensed data: keep them local and do not publish them.
+For definitions of counters and the fixed-length cold-KV workload, see [BENCHMARKING.md](BENCHMARKING.md).
 
 ### Options that change output bits
 
@@ -176,6 +197,11 @@ These scripts need caller-supplied inputs. They have no default trace, model or 
   Replay uses `ignore_eos`, so it disables the tool grammar. Use it only for fixed-length replay.
 - `bench/scripts/route_profile.py` builds the Q4 routing profile and replays cache hit rates. See
   [TESTING.md](TESTING.md#q4-routing-profile).
+- `bench/scripts/speed_prepare.py` and `bench/scripts/speed_bench.py` implement **FNS-SPEED v1 — adaptation of
+  SPEED-Bench, single-turn, concurrency 1**. Acquisition requires explicit license consent; preparation is
+  offline, and campaigns compare paired fresh processes through streaming HTTP. See
+  [BENCHMARKING.md](BENCHMARKING.md) for the full acquisition/check/run/report recipe, dependencies, privacy
+  boundary and interpretation limits. This is not an agent trace or an official SPEED-Bench score.
 
 Other scripts in `bench/scripts/` (`ab_*.py`, `kld.py`, `parity.py`, `exl3_dump.py`, `kld_exl3.py`) are not described
 here; read each script's header and `--help` output before use. Benchmarks that compare against llama.cpp need the pinned

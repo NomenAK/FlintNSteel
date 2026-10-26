@@ -158,6 +158,8 @@ class Engine:
         if args.expert_profile:
             cmd += ["--expert-profile", args.expert_profile]
         cmd += ["--spec", str(args.spec)]
+        if getattr(args, "spec_sample", None) is not None:
+            cmd += ["--spec-sample", str(args.spec_sample)]
         if args.kv_global != "f16":
             cmd += ["--kv-global", args.kv_global]
         if args.fa_int8:
@@ -182,12 +184,14 @@ class Engine:
         self.next_id = 0
         self.current = None  # id of the request in progress (cancellation)
 
-    def stream(self, ids, max_tokens, grammar=None, sampling=None, ignore_eos=False):
+    def stream(self, ids, max_tokens, grammar=None, sampling=None, ignore_eos=False, cache_prompt=True):
         """Yields tokens as they are generated; the last item is the final fns-serve message (dict)."""
+        if type(cache_prompt) is not bool:
+            raise ValueError("cache_prompt must be a boolean")
         # With a grammar, the turn ends with <|end_of_text|> (text) or <|observation|> (tool calls), and the matcher
         # alone decides: <|user|> is an allowed end before <|end_of_text|>.
         stop = [] if ignore_eos else [150001, 150005] if grammar is not None else EOS
-        req = {"tokens": ids, "max_tokens": max_tokens, "stop": stop, **(sampling or {})}
+        req = {"tokens": ids, "max_tokens": max_tokens, "stop": stop, **(sampling or {}), "cache_prompt": cache_prompt}
         if grammar is not None:
             req["grammar"] = grammar
         with self.lock:
@@ -305,8 +309,10 @@ class StreamSplitter:
         return deltas
 
 
-def make_handler(chat, engine, model_name, log=None, record=None):
+def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=False):
     log_lock = threading.Lock()
+    if log_tokens and log is None:
+        raise ValueError("log_tokens requires a local log")
 
     class Handler(BaseHTTPRequestHandler):
         def reply(self, status, value):
@@ -329,6 +335,12 @@ def make_handler(chat, engine, model_name, log=None, record=None):
                 return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                cache_prompt = req.get("cache_prompt", True)
+                if type(cache_prompt) is not bool:
+                    raise ValueError("cache_prompt must be a boolean")
+                request_id = self.headers.get("X-Request-ID")
+                if request_id is not None and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", request_id) is None:
+                    raise ValueError("X-Request-ID must contain 1 to 128 ASCII letters, digits, '.', '_', ':', or '-'")
                 if record is not None:
                     with log_lock:
                         record.write(json.dumps(req, ensure_ascii=False) + "\n")
@@ -355,7 +367,7 @@ def make_handler(chat, engine, model_name, log=None, record=None):
                 max_tokens = remaining if asked is None else min(int(asked), remaining)
                 if max_tokens < 1:
                     raise ValueError("max_tokens must be positive")
-                gen = engine.stream(ids, max_tokens, grammar, sampling, ignore_eos)
+                gen = engine.stream(ids, max_tokens, grammar, sampling, ignore_eos, cache_prompt=cache_prompt)
                 first = next(gen)  # prefill and first token: request errors are raised here
             except (ValueError, KeyError, RuntimeError) as e:
                 self.reply(400, {"error": str(e)})
@@ -397,13 +409,21 @@ def make_handler(chat, engine, model_name, log=None, record=None):
                         sent[field] += text
                         chunk({field: text})
             message, finish = finish_message(chat, out, tools)
+            if info.get("reason") == "length":
+                finish = "length"  # budget takes precedence, including when its last token happens to be EOS
             usage = {"prompt_tokens": len(ids), "completion_tokens": len(out), "total_tokens": len(ids) + len(out)}
             stats = {"reused_prefix": info.get("reused"), "prefill_ms": info.get("prefill_ms"),
                      "decode_ms": info.get("decode_ms"), "grammar": grammar is not None}
             if log is not None:
                 with log_lock:
-                    log.write(json.dumps({"t": time.time(), "prompt_tokens": len(ids), "completion_tokens": len(out),
-                                          "finish": finish, "stream": stream, **stats}) + "\n")
+                    entry = {"t": time.time(), "request_id": request_id, "prompt_tokens": len(ids),
+                             "completion_tokens": len(out), "finish": finish, "reason": info.get("reason"),
+                             "stream": stream, **stats}
+                    for name in ("spec_windows", "spec_drafted", "spec_accepted", "spec_emitted", "decode_iterations"):
+                        entry[name] = info.get(name)
+                    if log_tokens:
+                        entry["token_ids"] = out
+                    log.write(json.dumps(entry) + "\n")
                     log.flush()
             if stream:
                 # What the splitter held back is sent before the complete tool calls.
@@ -444,6 +464,8 @@ def main() -> None:
     ap.add_argument("--spec", type=int, default=3,
                     help="prompt-lookup speculation (same tokens): window of W tokens in greedy mode, 2 when sampling "
                          "(2 to 8; 0: disabled)")
+    ap.add_argument("--spec-sample", type=int,
+                    help="sampling speculation width (0 or 2 to --spec; default min(2, --spec))")
     ap.add_argument("--kv-global", choices=["f16", "q8_0"], default="f16",
                     help="KV cache of the global layers (q8_0: opt-in, changes the bits)")
     ap.add_argument("--fa-int8", action="store_true",
@@ -457,14 +479,20 @@ def main() -> None:
                     help="adaptive expert cache every N tokens (hybrid Q4, same bits); 0: static")
     ap.add_argument("--vocab", default=str(vocab_path()),
                     help="Flint token list (tools/xgrammar/export_vocab.py), used by the grammar")
-    ap.add_argument("--log", help="JSONL log, one line per request (tokens, reused prefix, prefill/decode ms)")
+    ap.add_argument("--log", help="local per-request JSONL metrics (no generated token IDs by default)")
+    ap.add_argument("--log-tokens", action="store_true", help="include private generated token IDs in --log")
     ap.add_argument("--record", help="record each request body (JSONL), for bench/scripts/agent_replay.py")
     o = ap.parse_args()
+    if o.log_tokens and not o.log:
+        ap.error("--log-tokens requires --log")
+    if o.spec_sample is not None and (o.spec_sample < 0 or o.spec_sample == 1 or o.spec_sample > o.spec):
+        ap.error("--spec-sample must be 0 or 2 to --spec")
     chat = Chat()
     engine = Engine(o)
     log = open(o.log, "a", encoding="utf-8") if o.log else None
     record = open(o.record, "a", encoding="utf-8") if o.record else None
-    server = ThreadingHTTPServer(("127.0.0.1", o.port), make_handler(chat, engine, Path(o.model).stem, log, record))
+    server = ThreadingHTTPServer(("127.0.0.1", o.port),
+                                make_handler(chat, engine, Path(o.model).stem, log, record, o.log_tokens))
     print(f"fns_server : http://127.0.0.1:{o.port}/v1", flush=True)
     server.serve_forever()
 

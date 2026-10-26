@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "protocol": {"path": "../../../bench/speed/protocol-v1.json", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "dependencies": {"path": "../../../bench/speed/requirements.lock", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "prepared_dir": "prepared/release",
+  "source_lock": {"path": "source-lock.json", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "output_dir": "runs",
+  "tokenizer": {"path": "${FNS_TOKENIZER}", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "template": {"path": "../../../serve/chat_template.jinja", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "vocab": {"path": "${FNS_MODELS}/prof/flint-vocab.json", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "fns_binary": {"path": "../../../build/fns-serve.exe", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "fns_server": {"path": "../../../serve/fns_server.py", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "llama_binary": {"path": "../../../external/llama.cpp/build-sm86/bin/llama-server.exe", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "dlls": [],
+  "sources": {
+    "fns": {"path": "../../..", "repository": "REPLACE_WITH_RECOVERABLE_FNS_SOURCE_URL", "commit": "REPLACE_WITH_40_HEX_COMMIT", "build_recipe": "build.bat; see docs/BENCHMARKING.md"},
+    "llama": {"path": "../../../external/llama.cpp", "repository": "https://github.com/ggml-org/llama.cpp", "commit": "REPLACE_WITH_40_HEX_COMMIT", "build_recipe": "REPLACE_WITH_EXACT_CMAKE_CONFIGURE_AND_BUILD_ARGV"}
+  },
+  "launchers": {"fns": ["{python}", "{fns_server}"], "llama": ["{llama_binary}"]},
+  "ports": {"fns": 8092, "llama": 8091},
+  "ctx": 32768,
+  "max_tokens": 256,
+  "pairs": 5,
+  "pair_order": ["A", "B"],
+  "generation": {"ignore_eos": true, "cache_prompt": false, "grammar": false, "penalties": "disabled", "llama_filters": "neutral"},
+  "sampling": {
+    "greedy": {"temperature": 0, "top_p": 1, "top_k": 0, "seeds": [0]},
+    "sample": {"temperature": 1, "top_p": 0.95, "top_k": 20, "seeds": [0, 7]}
+  },
+  "timeouts": {"startup": 600, "request": 1200, "shutdown": 30},
+  "warmup": {"messages": [{"role": "user", "content": "Write the numbers one to ten in ascending order."}], "max_tokens": 32},
+  "environment": {},
+  "environment_constraints": {"min_free_vram_mib": 20000, "max_gpu_temperature_c": 80, "max_idle_gpu_utilization_percent": 5},
+  "gpu_process_policy": {"mode": "strict", "allowed_graphics_paths": []},
+  "machine": {
+    "cuda": "REPLACE_WITH_CUDA_VERSION",
+    "msvc": "REPLACE_WITH_MSVC_VERSION",
+    "build_architecture": "sm_86",
+    "display_state": "REPLACE_WITH_DECLARED_DISPLAY_CONFIGURATION",
+    "memory_settings": {"fns_kv": "f16", "llama_k": "f16", "llama_v": "f16"}
+  },
+  "models": {
+    "q3": {
+      "artifact": {"path": "${FNS_MODELS}/flint-UD-Q3_K_XL.gguf", "sha256": "REPLACE_WITH_FILE_SHA256"},
+      "fns_argv": ["--ubatch", "2048", "--rebalance", "0"],
+      "llama_argv": ["--n-gpu-layers", "99", "--flash-attn", "on", "--cache-type-k", "f16", "--cache-type-v", "f16"],
+      "llama_calibration": {"corpus": "outside-speed", "recipe": "REPLACE_WITH_INDEPENDENT_CALIBRATION_RECIPE_AND_ARTIFACT_HASH"}
+    },
+    "q4": {
+      "artifact": {"path": "${FNS_MODELS}/flint-UD-Q4_K_XL.gguf", "sha256": "REPLACE_WITH_FILE_SHA256"},
+      "profile": {"path": "${FNS_MODELS}/prof/q4-code-train-8k.route", "sha256": "REPLACE_WITH_FILE_SHA256"},
+      "profile_corpus": "outside-speed",
+      "profile_recipe": "REPLACE_WITH_INDEPENDENT_ROUTING_PROFILE_RECIPE_AND_CORPUS_HASH",
+      "fns_argv": ["--ubatch", "2048", "--rebalance", "64"],
+      "llama_argv": ["--n-gpu-layers", "99", "--flash-attn", "on", "--cache-type-k", "f16", "--cache-type-v", "f16", "--n-cpu-moe", "12", "--moe-cache-mib", "2800"],
+      "llama_calibration": {"corpus": "outside-speed", "recipe": "REPLACE_WITH_INDEPENDENT_CALIBRATION_RECIPE_AND_ARTIFACT_HASH"}
+    }
+  }
+}

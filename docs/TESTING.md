@@ -29,6 +29,52 @@ with a small local tokenizer. `tests/test_assets.py` covers vocabulary export, r
 
 CI also byte-compiles the public Python files (`git ls-files '*.py'`, excluding `perso/`) with `python -m py_compile`.
 
+### FNS-SPEED synthetic tests
+
+The benchmark tests use invented fixtures, never excerpts or row identifiers from SPEED-Bench. They do not
+acquire source data, imply license consent or measure throughput. Essential pure-core tests run with
+`requirements-test.txt`, without importing the acquisition-only `datasets`/`pandas`/`pyarrow`/`tiktoken`
+stack or contacting the network. Run the focused suites from the repository root:
+
+```powershell
+py -3.14 -m unittest discover -s tests -p "test_speed_prepare.py" -v
+py -3.14 -m unittest discover -s tests -p "test_speed_bench.py" -v
+py -3.14 -m unittest discover -s tests -p "test_speed_report.py" -v
+py -3.14 -m unittest discover -s tests -p "test_service.py" -v
+```
+
+The suites cover deterministic selection and context eligibility, source/schema rejection, fragmented SSE
+and usage validation, cache-control/logging contracts, expected-pair completeness, statistics and allowlisted
+exports. Native cache behavior, GPU counter semantics and exact generated-token parity require the separate
+model-based check below; synthetic tests cannot establish them.
+
+## FNS-SPEED native contract smoke
+
+This is an opt-in GPU test using locally authored synthetic prompts, **not** acquired SPEED-Bench rows.
+It starts native processes sequentially for both quants and never downloads missing assets. Supply an existing
+tokenizer and routing profile; the output directory must be new:
+
+```powershell
+py -3.14 tests/speed_native_smoke.py --engine build/fns-serve.exe `
+    --q3 models/flint-UD-Q3_K_XL.gguf --q4 models/flint-UD-Q4_K_XL.gguf `
+    --expert-profile models/prof/q4-code-train-8k.route `
+    --tokenizer models/prof/flint-tokenizer.json --ctx 4096 --max-tokens 64 `
+    --out-dir perso/bench/speed/native-smoke
+```
+
+Defaults are `--ctx 4096`, `--ubatch 2048`, `--max-tokens 64` and `--timeout 600` seconds. The test exercises
+strict cache booleans, cold prefill after warmup, cached and omitted-default requests, and exact sequential/
+speculative output-token parity in greedy and sampling modes (seeds 0 and 7). It reconstructs speculative
+counters from the actual emitted IDs. Parity is compared at matching cache states, not between distinct
+cold/cached prefill geometries. It requires observed no-draft, full-acceptance and in-window-budget coverage;
+rare rejection/stop boundaries not exercised by the model are listed explicitly in `summary.json`, not claimed
+as covered. Raw requests, tokens and engine diagnostics remain private in the output directory.
+
+This check does not replace the real licensed-data smoke or release campaign. For those, follow
+[BENCHMARKING.md](BENCHMARKING.md): acquire and resolve authorized sources, prepare `--profile smoke --offline`,
+then check and run both quants and comparisons. A valid real smoke must observe both speculation and no-draft
+paths; a smoke report is always non-publishable as a release score. Neither recipe states that it has been run.
+
 ## Live HTTP smoke test
 
 `tests/http_smoke.py` checks a running OpenAI-compatible server. It sends requests to it and does not start one:

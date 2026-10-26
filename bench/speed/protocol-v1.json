@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "name": "FNS-SPEED v1",
+  "publication_name": "FNS-SPEED v1 — adaptation of SPEED-Bench, single-turn, concurrency 1",
+  "dataset": {"repo": "nvidia/SPEED-Bench", "revision": "fbd6dc64353a3153bf24252a113ebd6d2cff9dec"},
+  "resolver": {"repo": "NVIDIA/Model-Optimizer", "revision": "a4dfb916c8d4f958e11ff4dea8fd594f4ecc4260", "path": "examples/specdec_bench/specdec_bench/datasets/speed.py", "license": "Apache-2.0"},
+  "adaleval_reacquisition": {"repo": "AmamiSora/LOOM_Data", "revision": "73c39cc596c1d69d009a07e41a3af57c819fbbb7", "policy": "pinned-jsonl-to-exact-original-json", "license_scope": "no-redistribution-grant-inferred"},
+  "gpu_process_policies": ["strict", "wddm_desktop"],
+  "configs": ["qualitative", "throughput_1k", "throughput_2k", "throughput_8k", "throughput_16k", "throughput_32k"],
+  "categories": {
+    "qualitative": ["coding", "stem", "humanities", "math", "multilingual", "qa", "rag", "roleplay", "reasoning", "summarization", "writing"],
+    "throughput_1k": ["high_entropy", "mixed", "low_entropy"],
+    "throughput_2k": ["high_entropy", "mixed", "low_entropy"],
+    "throughput_8k": ["high_entropy", "mixed", "low_entropy"],
+    "throughput_16k": ["high_entropy", "mixed", "low_entropy"],
+    "throughput_32k": ["high_entropy", "mixed", "low_entropy"]
+  },
+  "ctx": 32768,
+  "max_tokens": 256,
+  "pairs": 5,
+  "concurrency": 1,
+  "throughput_per_category": 32,
+  "selection_salt": "fns-speed-v1",
+  "selection_order": "sha256 compact UTF-8 JSON [salt,config,str(question_id)], then str(question_id)",
+  "turn_policy": "first-user-turn-only",
+  "quantiles": "nearest-rank",
+  "ignore_eos": true,
+  "cache_prompt": false,
+  "grammar": null,
+  "tools": null,
+  "system_prompt": null,
+  "add_generation_prompt": true,
+  "normalizer": "serve/fns_server.py:normalize_messages",
+  "prompt_builder": "serve/fns_server.py:Chat.prompt_ids",
+  "sampling": {
+    "greedy": {"temperature": 0, "top_p": 1, "top_k": 0, "presence_penalty": 0, "frequency_penalty": 0, "repeat_penalty": 1, "seeds": [0]},
+    "sample": {"temperature": 1, "top_p": 0.95, "top_k": 20, "presence_penalty": 0, "frequency_penalty": 0, "repeat_penalty": 1, "seeds": [0, 7]}
+  },
+  "licenses": {
+    "nvidia-evaluation-dataset": "https://huggingface.co/datasets/nvidia/SPEED-Bench/blob/fbd6dc64353a3153bf24252a113ebd6d2cff9dec/License.pdf",
+    "third-party-sources": "https://huggingface.co/datasets/nvidia/SPEED-Bench/blob/fbd6dc64353a3153bf24252a113ebd6d2cff9dec/README.md#data-sources"
+  }
+}

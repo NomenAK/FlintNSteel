@@ -5,12 +5,14 @@
 //
 // Protocol: one JSON object per line (stdin: requests, stdout: responses).
 //   request   {"tokens": [prompt token ids], "max_tokens": N, "stop": [stop ids],
+//             "cache_prompt": true (optional; false forces a full prefill without clearing prompt lookup),
 //             "grammar": <xgrammar structural tag, JSON object> (optional),
 //             "temperature": t, "top_p": p, "top_k": k, "seed": s, "presence_penalty": x (optional; defaults:
 //             greedy, no penalty)}
 //   response  {"token": id} for each generated token, as soon as it is known, then
 //             {"done": true, "reason": "stop"|"length"|"cancel", "prompt_tokens": n, "reused": r, "generated": g,
-//             "prefill_ms": t, "decode_ms": t, "spec_windows": w, "spec_drafted": d}
+//             "prefill_ms": t, "decode_ms": t, "spec_windows": w, "spec_drafted": d,
+//             "spec_accepted": a, "spec_emitted": e, "decode_iterations": i}
 //   error     {"error": "message"} (the process keeps running)
 //   cancel    {"cancel": n}: stops the request whose "id" is n before its next token (reason "cancel").
 //             No effect if that request has already finished.
@@ -258,6 +260,10 @@ int run(int argc, char ** argv) {
                 const std::vector<int32_t> stop = int_array(o, "stop");
                 const auto mt = o.find("max_tokens");
                 const int max_tokens = mt != o.end() && mt->second.is<double>() ? (int) mt->second.get<double>() : 256;
+                const auto cp = o.find("cache_prompt");
+                if (cp != o.end() && !cp->second.is<bool>())
+                    throw std::runtime_error("cache_prompt must be a boolean");
+                const bool cache_prompt = cp == o.end() || cp->second.get<bool>();
                 if (prompt.empty()) throw std::runtime_error("empty prompt");
                 if ((int) prompt.size() + max_tokens > opt.n_ctx) throw std::runtime_error("context exceeded");
                 for (int32_t t : prompt)
@@ -336,7 +342,8 @@ int run(int argc, char ** argv) {
 #endif
                 // Common prefix, keeping at least one token to compute (the logits of the last prompt token).
                 size_t r = 0;
-                while (r < ctx.size() && r + 1 < prompt.size() && ctx[r] == prompt[r]) ++r;
+                if (cache_prompt)
+                    while (r < ctx.size() && r + 1 < prompt.size() && ctx[r] == prompt[r]) ++r;
                 if ((long) ctx.size() - (long) r > ring - 513) r = 0;
                 // Chained decode: the forward pass of the chosen token is queued (step_next) before the host reads it;
                 // the grammar mask of the next token is computed during that forward. When the token turns out to be a
@@ -347,7 +354,7 @@ int run(int argc, char ** argv) {
                 if constexpr (std::is_same_v<Engine, fns::Engine>) engine.maybe_rebalance((int) (prompt.size() - r));
                 ctx.assign(prompt.begin(), prompt.end());
                 const long long id = (long long) num("id", -1.0);
-                int generated = 0, windows = 0, drafted = 0;
+                int generated = 0, windows = 0, drafted = 0, accepted = 0, spec_emitted = 0, iterations = 0;
                 const char * reason = "length";
                 // Speculation: greedy, or coupled sampling (each column samples with the Philox counter of its
                 // generation index, giving the same tokens as sequential decoding for the same seed). Presence
@@ -367,6 +374,7 @@ int run(int argc, char ** argv) {
                         if (generated == max_tokens) break;
                         if (id >= 0 && input.cancel == id) { reason = "cancel"; break; }
                         ctx.push_back(tok);  // its forward is already queued (position ctx.size() - 1)
+                        ++iterations;  // one post-first-token decode, including the final choice
                         begin_choice();
                         // Adaptive cache: between the choice (queued) and the next forward. The swap is queued behind
                         // the forward already launched, so the next forward sees the new table.
@@ -400,6 +408,7 @@ int run(int argc, char ** argv) {
                         nd = W - 1;
                         const int p0 = (int) ctx.size() - 1;
                         if constexpr (std::is_same_v<Engine, fns::Engine>) engine.maybe_rebalance(1);
+                        ++iterations;  // a no-draft step or one verification call
                         if (nd == 0) {
                             engine.step_logits(last, p0);
                             begin_choice();
@@ -425,6 +434,8 @@ int run(int argc, char ** argv) {
                             last = t;
                             ++draw;
                             ++engaged;
+                            ++spec_emitted;
+                            if (c < nd && t == d[c]) ++accepted;  // count even when this token stops or fills the budget
                             done = commit(t);
                             if (c == nd || t != d[c]) break;  // next column was computed on another token
                         }
@@ -434,14 +445,15 @@ int run(int argc, char ** argv) {
                     ctx.pop_back();  // the last committed token has no KV (as in the chained path)
                 }
                 const auto t2 = std::chrono::steady_clock::now();
-                char buf[320];
+                char buf[512];
                 std::snprintf(buf, sizeof buf,
                               "{\"done\": true, \"reason\": \"%s\", \"prompt_tokens\": %zu, \"reused\": %zu, "
                               "\"generated\": %d, \"prefill_ms\": %.1f, \"decode_ms\": %.1f, \"spec_windows\": %d, "
-                              "\"spec_drafted\": %d}",
+                              "\"spec_drafted\": %d, \"spec_accepted\": %d, \"spec_emitted\": %d, \"decode_iterations\": %d}",
                               reason, prompt.size(), r, generated,
                               std::chrono::duration<double, std::milli>(t1 - t0).count(),
-                              std::chrono::duration<double, std::milli>(t2 - t1).count(), windows, drafted);
+                              std::chrono::duration<double, std::milli>(t2 - t1).count(), windows, drafted,
+                              accepted, spec_emitted, iterations);
                 emit(buf);
             } catch (const std::exception & e) {
                 ctx.clear();  // unknown state: the next request restarts from 0

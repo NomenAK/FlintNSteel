@@ -86,3 +86,40 @@ Model weights are not distributed with this repository. They are obtained separa
 - The Flint tokenizer (`RecursiveSI/flint`, `tokenizer.json`), which is loaded at runtime and is subject to the upstream model license.
 
 Refer to the upstream model cards for the exact license terms.
+
+## SPEED-Bench preparation and evaluation data
+
+The FNS-SPEED v1 preparation tools reference the official NVIDIA Model Optimizer resolver at
+[`a4dfb916c8d4f958e11ff4dea8fd594f4ecc4260`](https://github.com/NVIDIA/Model-Optimizer/tree/a4dfb916c8d4f958e11ff4dea8fd594f4ecc4260/examples/specdec_bench).
+Its upstream code is Apache-2.0. Acquisition retrieves the pinned resolver and its upstream license into the
+private work directory and records their provenance and digests; the public repository does not redistribute
+the official resolver class or a wholesale transcription. `bench/scripts/speed_sources.py` is the public
+acquisition adapter; the controlled loader reuses the original class locally with source acquisition
+constrained to recorded revisions. The private resolver retains its upstream SPDX/Apache header verbatim,
+and the upstream root `LICENSE` is fetched and hashed alongside it.
+This code license does **not** license its datasets or remove their access conditions.
+
+The dataset is [`nvidia/SPEED-Bench`](https://huggingface.co/datasets/nvidia/SPEED-Bench/tree/fbd6dc64353a3153bf24252a113ebd6d2cff9dec),
+revision `fbd6dc64353a3153bf24252a113ebd6d2cff9dec`, under the
+[NVIDIA Evaluation Dataset License Agreement](https://huggingface.co/datasets/nvidia/SPEED-Bench/blob/fbd6dc64353a3153bf24252a113ebd6d2cff9dec/License.pdf).
+It is acquired separately, only after explicit acceptance, and is not included in this repository or release
+assets. The agreement permits evaluation-result publication but prohibits dataset redistribution, including
+portions and associated annotations/metadata, and prohibits training AI solutions with the data.
+
+The resolver also uses third-party sources. Their individual licenses, source-specific terms and any account
+or access gates remain applicable independently of both the NVIDIA dataset agreement and Apache-2.0.
+Do not infer a blanket permissive license: HLE can be gated, OPUS100's card does not establish a known license,
+ChatRAG delegates licensing to individual underlying sources (including SQA), and LiveCodeBench's broad CC card
+label alone is not a complete source-terms review. Acquisition records exact source revisions where available,
+file hashes, license records and resolver provenance locally, and fails if a required source is unavailable.
+The official AdaLEval OpenCompass HTTP URLs are unversioned. The acquisition adapter uses the approved
+third-party [`AmamiSora/LOOM_Data` mirror](https://huggingface.co/datasets/AmamiSora/LOOM_Data/tree/73c39cc596c1d69d009a07e41a3af57c819fbbb7/Ada_LEval),
+revision `73c39cc596c1d69d009a07e41a3af57c819fbbb7`, to reconstruct the exact original JSON bytes from pinned
+JSONL files. Both mirror and reconstructed-original SHA-256 digests are checked; record order and duplicate
+occurrences are preserved. The official and mirror cards do not establish an explicit permissive dataset
+license or redistribution grant. This technical reacquisition route grants no additional rights; source
+review/consent remains required, and no dataset rows are included in the repository or release assets.
+
+All source rows, prompts, generated outputs, token IDs, row identifiers, raw logs and per-example metadata
+stay local. Only explicitly allowlisted, reviewed aggregate evaluation reports are candidates for publication.
+See [docs/BENCHMARKING.md](docs/BENCHMARKING.md) for consent, reproducibility and disclosure rules.
