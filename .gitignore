@@ -1,0 +1,31 @@
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.dll
+*.gguf
+*.safetensors
+*.kld
+*.nsys-rep
+*.sqlite
+__pycache__/
+/build*/
+
+# Generated benchmark output (never tracked)
+/bench/results/
+/bench/traces/
+
+# Local-only and generated trees
+/perso/
+/external/
+/models/
+/out/
+/output/
+.venv/
+venv/
+env/
+
+# Private reference material kept locally
+/réferences/

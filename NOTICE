@@ -1,0 +1,18 @@
+FlintNSteel
+
+This product includes software derived from the following projects. Their
+full license texts and copyright notices are in THIRD_PARTY_NOTICES.md and
+the licenses/ directory.
+
+XGrammar
+Copyright (c) 2024 by XGrammar Contributors
+Source: https://github.com/mlc-ai/xgrammar (v0.2.1, commit 5b4e9ce9e72524037ae24ecd831b9b6604d2eb48)
+Used: linked C++ library (structural tag compiler and grammar matcher);
+serve/flint_grammar.py translates its built-in structural tag. Apache-2.0.
+
+Recursive Flint serving components, from recursive-oss/rec (commit
+8af99abaf50b33903147d89eed91d1bb3ac642dd). Apache-2.0. The upstream
+repository provides no NOTICE file; the license text is in LICENSE.
+Used: the bundled chat template (serve/chat_template.jinja, same content as
+engine/src/rec_mlx/chat_template.jinja, LF line endings), normalize_messages
+and parse_tool_call in serve/fns_server.py, and serve/flint_grammar.py.

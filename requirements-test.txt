@@ -1,0 +1,5 @@
+-r requirements.txt
+numpy==2.5.3
+
+# Optional, isolated grammar reference (not installed by default): xgrammar==0.2.1 in a separate environment.
+# xgrammar's Python import loads torch; keep it out of the serving environment.

@@ -1,0 +1,506 @@
+{
+ "description": "Code corpus for the quality gates. Files are tracked by git, selected at random (seed 20261022), 1,500 to 40,000 characters each, and joined by a blank line. Regenerate with bench/corpus/build.py; the text itself is not committed.",
+ "tokenizer": "RecursiveSI/flint tokenizer.json @ 2a247be0",
+ "tokens": 139526,
+ "sha256_utf8": "773512a15d429fa5f20286021bb7f8165d1497dc722ff760e38b264f3419c601",
+ "builder": "bench/corpus/build.py",
+ "files": [
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-et/et-kernels/src/quants.h",
+   "tokens": 765,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cpu/ops.h",
+   "tokens": 2367,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-et/et-kernels/src/glu_f32.c",
+   "tokens": 8122,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-et/et-kernels/src/scale_f32.c",
+   "tokens": 891,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "tools/fit-params/fit-params.cpp",
+   "tokens": 688,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-hexagon/htp/hvx-div.h",
+   "tokens": 4600,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "src/llama-kv-cache-iswa.cpp",
+   "tokens": 3075,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "vendor/hash/sha1/sha1.c",
+   "tokens": 3154,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-backend-impl.h",
+   "tokens": 3358,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "src/models/t5.cpp",
+   "tokens": 4651,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "src/models/jais.cpp",
+   "tokens": 1569,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "tools/server/server-decision.h",
+   "tokens": 1825,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "tools/mtmd/models/dots3note.cpp",
+   "tokens": 826,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "tools/mtmd/models/hunyuanvl.cpp",
+   "tokens": 920,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-hexagon/htp/htp-fence.h",
+   "tokens": 973,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "src/models/olmoe.cpp",
+   "tokens": 1836,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "tests/test-quantize-stats.cpp",
+   "tokens": 3964,
+   "group": "llama.cpp C/C++"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/mmq.cu",
+   "tokens": 5817,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/argmax.cu",
+   "tokens": 828,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/gated_delta_net.cu",
+   "tokens": 4980,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/moe-weighted-reduction.cu",
+   "tokens": 739,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/tri.cu",
+   "tokens": 1650,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/tsembd.cu",
+   "tokens": 550,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/opt-step-sgd.cu",
+   "tokens": 550,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/pool1d.cu",
+   "tokens": 804,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/add-id.cu",
+   "tokens": 633,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/count-equal.cu",
+   "tokens": 637,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/pool2d.cu",
+   "tokens": 1787,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-cuda/sumrows.cu",
+   "tokens": 715,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "ggml/src/ggml-musa/mudnn.cu",
+   "tokens": 956,
+   "group": "llama.cpp CUDA"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "scripts/get_chat_template.py",
+   "tokens": 674,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "conversion/mistral.py",
+   "tokens": 2234,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "conversion/lev.py",
+   "tokens": 3642,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "conversion/muse_glimmer.py",
+   "tokens": 2042,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "conversion/januspro.py",
+   "tokens": 1006,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "conversion/internlm.py",
+   "tokens": 2443,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "tools/server/tests/unit/test_sleep.py",
+   "tokens": 1188,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "conversion/beam.py",
+   "tokens": 1715,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "conversion/grovemoe.py",
+   "tokens": 1238,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "conversion/openelm.py",
+   "tokens": 984,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "llama.cpp",
+   "commit": "19ab5a5e65736a35437e6b1c0ccd6562fed01b1b",
+   "path": "conversion/t5.py",
+   "tokens": 3077,
+   "group": "llama.cpp Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/src/rec_mlx/kernels/resident_block.py",
+   "tokens": 968,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/tests/test_serving.py",
+   "tokens": 2965,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/tests/test_chat.py",
+   "tokens": 2117,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/src/rec_mlx/kernels/activation_optimization.py",
+   "tokens": 1192,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/tests/validate_resident.py",
+   "tokens": 3775,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/src/rec_mlx/kernels/__init__.py",
+   "tokens": 461,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "tests/data/smoke-mlx-server.py",
+   "tokens": 1056,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/src/rec_mlx/grammar_builder.py",
+   "tokens": 685,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/src/rec_mlx/server.py",
+   "tokens": 2237,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "packaging/package.py",
+   "tokens": 1015,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/src/rec_mlx/kernels/rank_routing.py",
+   "tokens": 878,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/src/rec_mlx/kernels/sampling.py",
+   "tokens": 1542,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "engine/src/rec_mlx/quantized.py",
+   "tokens": 1342,
+   "group": "rec Python"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/serve_test.go",
+   "tokens": 1384,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/manifest.go",
+   "tokens": 1572,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/download.go",
+   "tokens": 2012,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/bundle.go",
+   "tokens": 855,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/opencode_test.go",
+   "tokens": 902,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/help.go",
+   "tokens": 813,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/context_test.go",
+   "tokens": 1222,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/launch_test.go",
+   "tokens": 1591,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/cli.go",
+   "tokens": 1530,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/pi.go",
+   "tokens": 938,
+   "group": "rec Go"
+  },
+  {
+   "repo": "rec",
+   "commit": "8af99abaf50b33903147d89eed91d1bb3ac642dd",
+   "path": "cli/ui.go",
+   "tokens": 1006,
+   "group": "rec Go"
+  },
+  {
+   "repo": "Strata",
+   "commit": "011c9e600a93bbc9fd451c563501b5831c32bbca",
+   "path": "sycl/src/platform/direct_file.cpp",
+   "tokens": 3417,
+   "group": "Strata C++"
+  },
+  {
+   "repo": "Strata",
+   "commit": "011c9e600a93bbc9fd451c563501b5831c32bbca",
+   "path": "src/platform/direct_file.cpp",
+   "tokens": 3407,
+   "group": "Strata C++"
+  },
+  {
+   "repo": "Strata",
+   "commit": "011c9e600a93bbc9fd451c563501b5831c32bbca",
+   "path": "include/strata/prefill/gdn_chunk.hpp",
+   "tokens": 1413,
+   "group": "Strata C++"
+  },
+  {
+   "repo": "Strata",
+   "commit": "011c9e600a93bbc9fd451c563501b5831c32bbca",
+   "path": "src/kernels/cpu/tq_avx512.cpp",
+   "tokens": 1835,
+   "group": "Strata C++"
+  },
+  {
+   "repo": "Strata",
+   "commit": "011c9e600a93bbc9fd451c563501b5831c32bbca",
+   "path": "sycl/src/core/native_dense.cpp",
+   "tokens": 5180,
+   "group": "Strata C++"
+  },
+  {
+   "repo": "Strata",
+   "commit": "011c9e600a93bbc9fd451c563501b5831c32bbca",
+   "path": "src/kernels/fused_gr_bench.cpp",
+   "tokens": 5741,
+   "group": "Strata C++"
+  }
+ ]
+}
