@@ -3,7 +3,7 @@
 //
 //   fns-bench --model F.gguf [-n 256 | -p N] [-d 0] [-r 1] [-ub N] [--ctx N] [-o jsonl] [--prompt ids.txt]
 //             [--weights gguf|exl3] [--expert-profile F] [--expert-vram MiB] [--kv-global f16|q8_0] [--rebalance N]
-//             [--fa-int8] [--fa-swa] [--attention-mma]
+//             [--rebalance-swap fused|copy] [--fa-int8] [--fa-swa] [--attention-mma]
 //
 // Fills D positions (synthetic ids as in llama-bench, or --prompt: those ids, D = their count), in batches of -ub
 // tokens when -ub is given (otherwise token by token). Decode: 8 untimed warm-up tokens, then N generated tokens
@@ -48,19 +48,32 @@ int run(int argc, char ** argv) {
         else if (!std::strcmp(a, "--prompt") && v) { prompt_path = v; ++i; }
         else if (!std::strcmp(a, "--kv-global") && v) { opt.kv_global_q8 = !std::strcmp(v, "q8_0"); ++i; }
         else if (!std::strcmp(a, "--rebalance") && v) { opt.rebalance_every = std::atoi(v); ++i; }
+        else if (!std::strcmp(a, "--rebalance-swap") && v) {
+            if (std::strcmp(v, "fused") && std::strcmp(v, "copy")) {
+                std::fprintf(stderr, "fns-bench: --rebalance-swap must be fused or copy\n");
+                return 2;
+            }
+            opt.rebalance_fused_swap = !std::strcmp(v, "fused");
+            ++i;
+        }
         else if (!std::strcmp(a, "--fa-int8")) { opt.fa_int8 = true; }
         else if (!std::strcmp(a, "--fa-swa")) { opt.fa_swa = true; }
         else if (!std::strcmp(a, "--attention-mma")) { opt.attention_mma = true; }
         else {
             std::fprintf(stderr, "usage: fns-bench --model F.gguf [-n 256 | -p N] [-d 0] [-r 1] [-ub N] [--ctx N] [-o jsonl] "
                                  "[--weights gguf|exl3] [--prompt ids.txt] [--expert-profile F] [--expert-vram MiB] "
-                                 "[--kv-global f16|q8_0] [--rebalance N] [--fa-int8] [--fa-swa] [--attention-mma]\n");
+                                 "[--kv-global f16|q8_0] [--rebalance N] [--rebalance-swap fused|copy] "
+                                 "[--fa-int8] [--fa-swa] [--attention-mma]\n");
             return 2;
         }
     }
     if (!model_path) return 2;
     if (opt.attention_mma && !std::is_same_v<Engine, fns::Engine>) {
         std::fprintf(stderr, "fns-bench: --attention-mma: GGUF only\n");
+        return 2;
+    }
+    if (opt.rebalance_fused_swap && !std::is_same_v<Engine, fns::Engine>) {
+        std::fprintf(stderr, "fns-bench: --rebalance-swap fused: GGUF only\n");
         return 2;
     }
     if (n_prompt > 0) n_gen = 0;  // -p: prefill only, like llama-bench -p N -n 0
@@ -142,8 +155,14 @@ int run(int argc, char ** argv) {
             std::printf("tg%d @ d%d : %.2f tok/s\n", n_gen, depth, avg);
         }
         if constexpr (std::is_same_v<Engine, fns::Engine>) {
-            if (opt.rebalance_every > 0)
-                std::fprintf(stderr, "fns-bench: adaptive cache, %lld swaps\n", engine.placement().swaps);
+            if (opt.rebalance_every > 0) {
+                const auto & placement = engine.placement();
+                std::fprintf(stderr, "fns-bench: adaptive cache, %lld swaps", placement.swaps);
+                if (placement.rebalance_timing)
+                    std::fprintf(stderr, ", %.3f ms, %lld calls, %llu bytes exchanged", placement.rebalance_ms,
+                                 placement.rebalance_calls, (unsigned long long) placement.rebalance_bytes);
+                std::fprintf(stderr, "\n");
+            }
         }
     } catch (const std::exception & e) {
         std::fprintf(stderr, "fns-bench: %s\n", e.what());

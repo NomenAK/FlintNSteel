@@ -161,6 +161,8 @@ class Engine:
         cmd += ["--spec", str(args.spec)]
         if getattr(args, "spec_sample", None) is not None:
             cmd += ["--spec-sample", str(args.spec_sample)]
+        if getattr(args, "spec_adapt", False):
+            cmd += ["--spec-adapt"]
         if args.kv_global != "f16":
             cmd += ["--kv-global", args.kv_global]
         if args.fa_int8:
@@ -171,6 +173,8 @@ class Engine:
             cmd += ["--attention-mma"]
         if args.rebalance:
             cmd += ["--rebalance", str(args.rebalance)]
+        if getattr(args, "rebalance_swap", "copy") != "copy":
+            cmd += ["--rebalance-swap", args.rebalance_swap]
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
         try:
             if self.p.stdin is None or self.p.stdout is None:
@@ -487,6 +491,8 @@ def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=Fal
                              "stream": stream, **stats}
                     for name in ("spec_windows", "spec_drafted", "spec_accepted", "spec_emitted", "decode_iterations"):
                         entry[name] = info.get(name)
+                    if "spec_skipped" in info:
+                        entry["spec_skipped"] = info["spec_skipped"]
                     if log_tokens:
                         entry["token_ids"] = out
                     log.write(json.dumps(entry) + "\n")
@@ -532,6 +538,8 @@ def main() -> None:
                          "(2 to 8; 0: disabled)")
     ap.add_argument("--spec-sample", type=int,
                     help="sampling speculation width (0 or 2 to --spec; default min(2, --spec))")
+    ap.add_argument("--spec-adapt", action="store_true",
+                    help="opt-in adaptive speculation window (same tokens; requires --spec > 0)")
     ap.add_argument("--kv-global", choices=["f16", "q8_0"], default="f16",
                     help="KV cache of the global layers (q8_0: opt-in, changes the bits)")
     ap.add_argument("--fa-int8", action="store_true",
@@ -543,6 +551,8 @@ def main() -> None:
                     help="MMA global attention for decode/verification (opt-in, changes the bits; F16 KV)")
     ap.add_argument("--rebalance", type=int, default=0,
                     help="adaptive expert cache every N tokens (hybrid Q4, same bits); 0: static")
+    ap.add_argument("--rebalance-swap", choices=("copy", "fused"), default="copy",
+                    help="rebalance swap: three copies or one in-place GPU swap kernel (opt-in, same bits)")
     ap.add_argument("--vocab", default=str(vocab_path()),
                     help="Flint token list (tools/xgrammar/export_vocab.py), used by the grammar")
     ap.add_argument("--log", help="local per-request JSONL metrics (no generated token IDs by default)")
@@ -554,6 +564,8 @@ def main() -> None:
         ap.error("--log-tokens requires --log")
     if o.spec_sample is not None and (o.spec_sample < 0 or o.spec_sample == 1 or o.spec_sample > o.spec):
         ap.error("--spec-sample must be 0 or 2 to --spec")
+    if o.spec_adapt and o.spec <= 0:
+        ap.error("--spec-adapt requires --spec > 0")
     chat = Chat()
     engine = Engine(o)
     try:

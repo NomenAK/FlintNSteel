@@ -21,6 +21,29 @@ namespace {
 
 constexpr int kBlock = 256;
 
+template <bool Aligned>
+__global__ void k_swap_bytes(uint8_t * a, uint8_t * b, size_t n) {
+    const size_t fragments = n / 16 + (n % 16 != 0);
+    for (size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x; i < fragments;
+         i += (size_t) blockDim.x * gridDim.x) {
+        const size_t offset = i * 16;
+        if (Aligned && n - offset >= 16) {
+            uint4 * pa = reinterpret_cast<uint4 *>(a + offset);
+            uint4 * pb = reinterpret_cast<uint4 *>(b + offset);
+            const uint4 va = *pa, vb = *pb;
+            *pa = vb;
+            *pb = va;
+        } else {
+            const size_t count = n - offset < 16 ? n - offset : 16;
+            for (size_t j = 0; j < count; ++j) {
+                const uint8_t va = a[offset + j], vb = b[offset + j];
+                a[offset + j] = vb;
+                b[offset + j] = va;
+            }
+        }
+    }
+}
+
 // block_q8_1 from ggml-common.h (MIT, The ggml authors): 32 int8 values and (d, Σx) as half2. Same layout, checked by the
 // static_assert; quantize_row_q8_1_cuda and ggml's MMVQ read these blocks.
 struct block_q8_1 {
@@ -731,6 +754,18 @@ __global__ void k_io_advance(int32_t * io, int pos) {
 int blocks(int n) { return (n + kBlock - 1) / kBlock; }
 
 }  // namespace
+
+void swap_bytes(void * a, void * b, size_t n, cudaStream_t st) {
+    if (!n) return;
+    const size_t fragments = n / 16 + (n % 16 != 0);
+    const size_t needed = fragments / kBlock + (fragments % kBlock != 0);
+    const unsigned int grid = (unsigned int) (needed < 65535 ? needed : 65535);
+    if ((reinterpret_cast<uintptr_t>(a) | reinterpret_cast<uintptr_t>(b)) % 16 == 0)
+        k_swap_bytes<true><<<grid, kBlock, 0, st>>>((uint8_t *) a, (uint8_t *) b, n);
+    else
+        k_swap_bytes<false><<<grid, kBlock, 0, st>>>((uint8_t *) a, (uint8_t *) b, n);
+    FNS_CHECK(cudaGetLastError());
+}
 
 void argmax(const float * x, int n, int32_t * out, cudaStream_t st, const uint32_t * mask) {
     k_topk_part<<<kSelBlocks, kSelThreads, 0, st>>>(x, n, mask, 1);

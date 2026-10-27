@@ -1,7 +1,8 @@
 // tools/fns_serve/fns_serve.cpp - engine process driven by the Python server over stdin/stdout.
 //
 //   fns-serve --model F.gguf [--ctx 32768] [--ubatch 2048] [--expert-profile F] [--expert-vram MiB]
-//             [--tokenizer tokenizer.json --vocab vocab.json] [--spec W] [--spec-sample W]
+//             [--tokenizer tokenizer.json --vocab vocab.json] [--spec W] [--spec-sample W] [--spec-adapt]
+//             [--rebalance-swap fused|copy]
 //
 // Protocol: one JSON object per line (stdin: requests, stdout: responses).
 //   request   {"tokens": [prompt token ids], "max_tokens": N, "stop": [stop ids],
@@ -12,7 +13,7 @@
 //   response  {"token": id} for each generated token, as soon as it is known, then
 //             {"done": true, "reason": "stop"|"length"|"cancel", "prompt_tokens": n, "reused": r, "generated": g,
 //             "prefill_ms": t, "decode_ms": t, "spec_windows": w, "spec_drafted": d,
-//             "spec_accepted": a, "spec_emitted": e, "decode_iterations": i}
+//             "spec_accepted": a, "spec_emitted": e, "spec_skipped": s, "decode_iterations": i}
 //   error     {"error": "message"} (the process keeps running)
 //   cancel    {"cancel": n}: stops the request whose "id" is n before its next token (reason "cancel").
 //             No effect if that request has already finished.
@@ -34,6 +35,7 @@
 // speculation for the same seed (bit-identical logits, same sampler, same counter). Without a draft: one step.
 // Window width is --spec for greedy and --spec-sample for sampling (default min(2, --spec); 0: no speculation when
 // sampling).
+// --spec-adapt is opt-in: adjusts draft width from prior committed verification outcomes, with periodic probes.
 // Presence penalty: column c counts d[0 .. c) as already seen, and only committed choices are marked
 // (Engine::presence_commit): same state as sequential decoding, same tokens.
 #include "fns/lookup.h"
@@ -167,6 +169,7 @@ template<class Model, class Engine>
 int run(int argc, char ** argv) {
     const char * model_path = nullptr, * tokenizer_path = nullptr, * vocab_path = nullptr;
     int spec_sample = -1;
+    bool spec_adapt = false;
     fns::EngineOptions opt;
     opt.n_ctx = 32768;
     opt.ubatch = 2048;
@@ -182,15 +185,25 @@ int run(int argc, char ** argv) {
         else if (!std::strcmp(a, "--vocab") && v) { vocab_path = v; ++i; }
         else if (!std::strcmp(a, "--spec") && v) { opt.verify_cols = std::atoi(v); ++i; }
         else if (!std::strcmp(a, "--spec-sample") && v) { spec_sample = std::atoi(v); ++i; }
+        else if (!std::strcmp(a, "--spec-adapt")) { spec_adapt = true; }
         else if (!std::strcmp(a, "--kv-global") && v) { opt.kv_global_q8 = !std::strcmp(v, "q8_0"); ++i; }
         else if (!std::strcmp(a, "--fa-int8")) { opt.fa_int8 = true; }
         else if (!std::strcmp(a, "--fa-swa")) { opt.fa_swa = true; }
         else if (!std::strcmp(a, "--attention-mma")) { opt.attention_mma = true; }
         else if (!std::strcmp(a, "--rebalance") && v) { opt.rebalance_every = std::atoi(v); ++i; }
+        else if (!std::strcmp(a, "--rebalance-swap") && v) {
+            if (std::strcmp(v, "fused") && std::strcmp(v, "copy")) {
+                std::fprintf(stderr, "fns-serve: --rebalance-swap must be fused or copy\n");
+                return 2;
+            }
+            opt.rebalance_fused_swap = !std::strcmp(v, "fused");
+            ++i;
+        }
         else {
             std::fprintf(stderr, "usage: fns-serve --model F.gguf [--ctx 32768] [--ubatch 2048] [--expert-profile F] "
                                  "[--weights gguf|exl3] [--expert-vram MiB] [--tokenizer tokenizer.json --vocab vocab.json] "
-                                 "[--spec W] [--spec-sample W] [--kv-global f16|q8_0] [--fa-int8] [--fa-swa] [--attention-mma] [--rebalance N]\n");
+                                 "[--spec W] [--spec-sample W] [--spec-adapt] [--kv-global f16|q8_0] [--fa-int8] [--fa-swa] [--attention-mma] "
+                                 "[--rebalance N] [--rebalance-swap fused|copy]\n");
             return 2;
         }
     }
@@ -205,6 +218,10 @@ int run(int argc, char ** argv) {
     if (spec_sample < 0) spec_sample = std::min(spec, 2);
     if (spec == 1 || spec < 0 || spec > 8 || spec_sample == 1 || spec_sample > spec) {
         std::fprintf(stderr, "fns-serve: --spec must be 2 to 8, --spec-sample 0 or 2 to --spec\n");
+        return 2;
+    }
+    if (spec_adapt && spec == 0) {
+        std::fprintf(stderr, "fns-serve: --spec-adapt requires --spec greater than 0\n");
         return 2;
     }
     try {
@@ -354,7 +371,7 @@ int run(int argc, char ** argv) {
                 if constexpr (std::is_same_v<Engine, fns::Engine>) engine.maybe_rebalance((int) (prompt.size() - r));
                 ctx.assign(prompt.begin(), prompt.end());
                 const long long id = (long long) num("id", -1.0);
-                int generated = 0, windows = 0, drafted = 0, accepted = 0, spec_emitted = 0, iterations = 0;
+                int generated = 0, windows = 0, drafted = 0, accepted = 0, spec_emitted = 0, skipped = 0, iterations = 0;
                 const char * reason = "length";
                 // Speculation: greedy, or coupled sampling (each column samples with the Philox counter of its
                 // generation index, giving the same tokens as sequential decoding for the same seed). Presence
@@ -389,6 +406,11 @@ int run(int argc, char ** argv) {
                     int32_t last = end_choice();
                     t1 = std::chrono::steady_clock::now();
                     std::vector<int32_t> ids(spec), out(spec), d(spec);
+                    // Unmeasured heuristics: below half accepted shrinks, at least three quarters grows; two
+                    // zero-accept windows trigger sequential steps with doubling backoff (capped at 64).
+                    // A successful probe resets the backoff; all state is local to this request.
+                    int adapt_limit = (sp.temperature <= 0.0f ? spec : spec_sample) - 1;
+                    int zero_windows = 0, backoff = 0, backoff_size = 1;
                     auto commit = [&](int32_t t) {  // emits t; returns true if generation stops
                         emit("{\"token\": " + std::to_string(t) + "}");
                         ++generated;
@@ -404,6 +426,15 @@ int run(int argc, char ** argv) {
                         const int width = sp.temperature <= 0.0f ? spec : spec_sample;
                         const int room = std::min(width - 1, max_tokens - generated);
                         int nd = room > 0 ? fns::lookup_draft(ctx, room, d.data()) : 0;
+                        if (spec_adapt) {
+                            if (backoff > 0) {
+                                --backoff;
+                                if (nd > 0) ++skipped;
+                                nd = 0;
+                            } else {
+                                nd = std::min(nd, adapt_limit);
+                            }
+                        }
                         const int W = nd > 0 ? window_masks(d.data(), nd) : 1;
                         nd = W - 1;
                         const int p0 = (int) ctx.size() - 1;
@@ -425,6 +456,7 @@ int run(int argc, char ** argv) {
                         drafted += nd;
                         // Column c: choice after ids[0 .. c]. Valid while the previous inputs were committed.
                         int engaged = 0;
+                        int window_accepted = 0;
                         for (int c = 0; c < W && !done; ++c) {
                             const int32_t t = out[c];
 #ifdef FNS_WITH_XGRAMMAR
@@ -435,9 +467,23 @@ int run(int argc, char ** argv) {
                             ++draw;
                             ++engaged;
                             ++spec_emitted;
-                            if (c < nd && t == d[c]) ++accepted;  // count even when this token stops or fills the budget
+                            if (c < nd && t == d[c]) { ++accepted; ++window_accepted; }  // includes a stopping token
                             done = commit(t);
                             if (c == nd || t != d[c]) break;  // next column was computed on another token
+                        }
+                        if (spec_adapt) {
+                            if (window_accepted * 2 < nd) adapt_limit = std::max(1, adapt_limit - 1);
+                            else if (window_accepted * 4 >= nd * 3) adapt_limit = std::min(width - 1, adapt_limit + 1);
+                            if (window_accepted == 0) {
+                                if (++zero_windows >= 2) {
+                                    backoff = backoff_size;
+                                    backoff_size = std::min(backoff_size * 2, 64);
+                                    zero_windows = 1;  // a failed probe starts the next backoff
+                                }
+                            } else {
+                                zero_windows = 0;
+                                backoff_size = 1;
+                            }
                         }
                         if (sp.presence_penalty != 0.0f) engine.presence_commit(engaged);
                         engine.maybe_rebalance(engaged - 1);
@@ -449,11 +495,11 @@ int run(int argc, char ** argv) {
                 std::snprintf(buf, sizeof buf,
                               "{\"done\": true, \"reason\": \"%s\", \"prompt_tokens\": %zu, \"reused\": %zu, "
                               "\"generated\": %d, \"prefill_ms\": %.1f, \"decode_ms\": %.1f, \"spec_windows\": %d, "
-                              "\"spec_drafted\": %d, \"spec_accepted\": %d, \"spec_emitted\": %d, \"decode_iterations\": %d}",
+                              "\"spec_drafted\": %d, \"spec_accepted\": %d, \"spec_emitted\": %d, \"spec_skipped\": %d, \"decode_iterations\": %d}",
                               reason, prompt.size(), r, generated,
                               std::chrono::duration<double, std::milli>(t1 - t0).count(),
                               std::chrono::duration<double, std::milli>(t2 - t1).count(), windows, drafted,
-                              accepted, spec_emitted, iterations);
+                              accepted, spec_emitted, skipped, iterations);
                 emit(buf);
             } catch (const std::exception & e) {
                 ctx.clear();  // unknown state: the next request restarts from 0

@@ -158,6 +158,11 @@ add_executable(fns-expert-parity tests/expert_parity.cu)
 target_compile_options(fns-expert-parity PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)
 target_link_libraries(fns-expert-parity PRIVATE fns)
 
+# Byte-exact in-place exchange of VRAM and mapped host expert slots.
+add_executable(fns-swap-parity tests/swap_parity.cu)
+target_compile_options(fns-swap-parity PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)
+target_link_libraries(fns-swap-parity PRIVATE fns)
+
 # Prefill MMQ: expert pointer tables against contiguous experts (bit for bit), and deviation from MMVQ (dense and experts).
 add_executable(fns-mmq-parity tests/mmq_parity.cu)
 target_compile_options(fns-mmq-parity PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)
@@ -200,6 +205,6 @@ function(fns_copy_llama_runtime target)
 endfunction()
 
 foreach(_exe fns-ref fns-bench fns-kld fns-verify fns-serve fns-sample-check fns-mmvq-bench fns-kernel-parity
-             fns-expert-parity fns-mmq-parity fns-attention-mma-parity fns-dump fns-exl3-parity)
+             fns-expert-parity fns-swap-parity fns-mmq-parity fns-attention-mma-parity fns-dump fns-exl3-parity)
     fns_copy_llama_runtime(${_exe})
 endforeach()

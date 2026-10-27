@@ -176,6 +176,13 @@ Engine::Engine(const Model & model, const EngineOptions & opt) : m_(model), opt_
     if (opt_.ubatch > 0) alloc_prefill();
     // Experts last: they take the VRAM that remains.
     place_experts();
+    if (const char * p = std::getenv("FNS_REBALANCE_TIMING")) {
+        if (opt_.rebalance_every > 0 && std::strcmp(p, "1") == 0) {
+            placement_.rebalance_timing = true;
+            FNS_CHECK(cudaEventCreate(&rebalance_start_));
+            FNS_CHECK(cudaEventCreate(&rebalance_end_));
+        }
+    }
     // The graph is captured only outside diagnostics: trace() reads and prints mid-token.
     use_graph_ = trace_layer_ < 0 && std::getenv("FNS_NO_GRAPH") == nullptr;
 }
@@ -474,16 +481,15 @@ void Engine::place_experts() {
             const double k = s > 0 ? hp.n_expert_used * (double) opt_.rebalance_half_life / s : 0.0;
             for (int e = 0; e < NE; ++e) freq_[(size_t) il * NE + e] *= k;
         }
-        FNS_CHECK(cudaMalloc(&swap_buf_, *std::max_element(slot.begin(), slot.end())));
-        allocs_.push_back(swap_buf_);
+        if (!opt_.rebalance_fused_swap) {
+            FNS_CHECK(cudaMalloc(&swap_buf_, *std::max_element(slot.begin(), slot.end())));
+            allocs_.push_back(swap_buf_);
+        }
     }
 }
 
-// Adaptive cache: GPU counters folded into freq_ (half-life decay), then per layer, while the most-routed non-resident
-// expert exceeds the least-routed resident by at least one selection, their slots are swapped: the victim is saved in
-// swap_buf_, the promoted expert is copied into the freed VRAM slot, the victim is written to the freed host slot, then
-// the layer's table is updated. All on st_: the next forward sees the new table and complete weights. An expert's
-// weights do not change: same bits.
+// Adaptive cache: fold counters into decaying frequencies and exchange slots when routing favors a non-resident expert.
+// Copy or fused swaps and the pointer-table uploads are ordered on st_; the next forward sees complete weights.
 int Engine::maybe_rebalance(int tokens) {
     if (opt_.rebalance_every <= 0) return 0;
     since_rebalance_ += tokens;
@@ -511,10 +517,16 @@ int Engine::maybe_rebalance(int tokens) {
             const size_t sb = slot_bytes_[il], ii = (size_t) il * NE + in, io = (size_t) il * NE + out;
             char * vram = slot_ptr_[io];           // VRAM slot of the victim
             char * host = slot_host_[ii];          // host slot of the promoted expert
-            FNS_CHECK(cudaMemcpyAsync(swap_buf_, vram, sb, cudaMemcpyDeviceToDevice, st_));
-            FNS_CHECK(cudaMemcpyAsync(vram, host, sb, cudaMemcpyHostToDevice, st_));
-            FNS_CHECK(cudaMemcpyAsync(host, swap_buf_, sb, cudaMemcpyDeviceToHost, st_));
             char * host_dev = slot_ptr_[ii];       // GPU view of the host slot
+            if (rebalance_start_ && swaps == 0) FNS_CHECK(cudaEventRecord(rebalance_start_, st_));
+            if (opt_.rebalance_fused_swap) {
+                k::swap_bytes(vram, host_dev, sb, st_);
+            } else {
+                FNS_CHECK(cudaMemcpyAsync(swap_buf_, vram, sb, cudaMemcpyDeviceToDevice, st_));
+                FNS_CHECK(cudaMemcpyAsync(vram, host, sb, cudaMemcpyHostToDevice, st_));
+                FNS_CHECK(cudaMemcpyAsync(host, swap_buf_, sb, cudaMemcpyDeviceToHost, st_));
+            }
+            if (rebalance_start_) placement_.rebalance_bytes += (uint64_t) sb * 2;
             slot_ptr_[ii] = vram;
             slot_ptr_[io] = host_dev;
             slot_host_[io] = host;
@@ -529,7 +541,16 @@ int Engine::maybe_rebalance(int tokens) {
                                       NE * sizeof(char *), cudaMemcpyHostToDevice, st_));
     }
     // The table copy reads slot_ptr_ (pageable host memory): wait before a later call modifies it.
-    if (swaps) FNS_CHECK(cudaStreamSynchronize(st_));
+    if (swaps) {
+        if (rebalance_end_) FNS_CHECK(cudaEventRecord(rebalance_end_, st_));
+        FNS_CHECK(cudaStreamSynchronize(st_));
+        if (rebalance_end_) {
+            float ms = 0;
+            FNS_CHECK(cudaEventElapsedTime(&ms, rebalance_start_, rebalance_end_));
+            placement_.rebalance_ms += ms;
+            ++placement_.rebalance_calls;
+        }
+    }
     placement_.swaps += swaps;
     return swaps;
 }
@@ -550,6 +571,8 @@ Engine::~Engine() {
         if (e) cudaGraphExecDestroy(e);
     if (vio_host_) cudaFreeHost(vio_host_);
     if (pick_ev_) cudaEventDestroy(pick_ev_);
+    if (rebalance_start_) cudaEventDestroy(rebalance_start_);
+    if (rebalance_end_) cudaEventDestroy(rebalance_end_);
     if (cublas_) cublasDestroy(cublas_);
     if (mask_pinned_) cudaFreeHost(mask_pinned_);
     if (vmask_pinned_) cudaFreeHost(vmask_pinned_);

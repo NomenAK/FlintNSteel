@@ -69,6 +69,7 @@ struct EngineOptions {
     int rebalance_every = 0;
     int rebalance_half_life = 2048;
     int rebalance_max = 4;
+    bool rebalance_fused_swap = false;  // swap VRAM and mapped host slots in place on the GPU
 };
 
 // Sampling parameters (Engine::pick). temperature <= 0: greedy.
@@ -88,6 +89,10 @@ struct ExpertPlacement {
     int vram_experts = 0, host_experts = 0;
     std::vector<uint8_t> resident;  // [n_layer][n_expert]: 1 if in VRAM (dense layers: 0)
     long long swaps = 0;            // VRAM <-> RAM swaps done by maybe_rebalance()
+    double rebalance_ms = 0;        // GPU event time for swap and pointer-table work when timing is enabled
+    long long rebalance_calls = 0;  // timed calls that performed at least one swap
+    uint64_t rebalance_bytes = 0;  // logical bytes exchanged (two slot sizes per swap)
+    bool rebalance_timing = false;
 };
 
 class Engine {
@@ -164,6 +169,7 @@ private:
     char * swap_buf_ = nullptr;        // VRAM, one slot of the largest layer: swap buffer
     char ** exp_tables_ = nullptr;     // GPU, [n_layer][n_expert]
     int since_rebalance_ = 0;
+    cudaEvent_t rebalance_start_ = nullptr, rebalance_end_ = nullptr;
     // INT8 FA of prefill (fa_int8): shared Q buffer, quantized K and mean per global layer.
     void * fa_q_ = nullptr;
     std::vector<void *> fa_k_;

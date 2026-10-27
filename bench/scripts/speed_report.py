@@ -77,8 +77,8 @@ def _nullable_ratio(numerator, denominator):
 # Values are parsed and reserialized; arbitrary option strings never reach output.
 _PATH_FLAGS = {"--model": "{model}", "-m": "{model}", "--engine": "{fns_binary}", "--vocab": "{vocab}", "--expert-profile": "{profile}", "--chat-template-file": "{template}", "--log": "{metrics}"}
 _INT_FLAGS = frozenset(("--ctx", "--ctx-size", "-c", "--spec", "--spec-sample", "--parallel", "--n-gpu-layers", "-ngl", "--n-cpu-moe", "--moe-cache-mib", "--ubatch", "--rebalance", "--threads", "--threads-batch", "-t", "-tb", "--batch-size", "--ubatch-size", "-b", "-ub", "--gpu-layers", "--cache-ram", "--main-gpu"))
-_BOOL_FLAGS = frozenset(("--jinja", "--metrics", "--slots", "--log-tokens", "--no-mmap", "--mlock", "--no-warmup", "--no-webui", "--no-context-shift", "--swa-full"))
-_ENUM_FLAGS = {"--kv-global": ("f16",), "--cache-type-k": ("f16",), "--cache-type-v": ("f16",), "-ctk": ("f16",), "-ctv": ("f16",), "--flash-attn": ("on", "off", "auto"), "-fa": ("on", "off", "auto"), "--host": ("127.0.0.1", "localhost"), "--fit": ("on", "off")}
+_BOOL_FLAGS = frozenset(("--jinja", "--metrics", "--slots", "--log-tokens", "--no-mmap", "--mlock", "--no-warmup", "--no-webui", "--no-context-shift", "--swa-full", "--spec-adapt"))
+_ENUM_FLAGS = {"--kv-global": ("f16",), "--cache-type-k": ("f16",), "--cache-type-v": ("f16",), "-ctk": ("f16",), "-ctv": ("f16",), "--flash-attn": ("on", "off", "auto"), "-fa": ("on", "off", "auto"), "--host": ("127.0.0.1", "localhost"), "--fit": ("on", "off"), "--rebalance-swap": ("copy", "fused")}
 
 
 def _portable_options(argv):

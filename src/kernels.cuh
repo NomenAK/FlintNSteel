@@ -17,6 +17,9 @@ namespace fns::k {
 // captured once and replayed with other values. W-column verification: `cols` consecutive columns, column c reads
 // token[c] and position *pos + c; each column's arithmetic is that of cols = 1.
 
+// Exchange n bytes between distinct GPU-visible buffers in place, including unaligned pointers and tails.
+void swap_bytes(void * a, void * b, size_t n, cudaStream_t st);
+
 // Row `token[c]` of token_embd (Q8_0, on GPU: blocks of 32 = half d + int8[32]) -> out[c] F32, c < cols.
 // ggml dequantize_row_q8_0.
 void embed_q8_0(const void * table, const int32_t * token, float * out, int n, int cols, cudaStream_t st);

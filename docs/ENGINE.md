@@ -34,6 +34,18 @@ numerical output. It states current limits and contains no benchmark results.
 
 `Engine::placement()` returns an `ExpertPlacement` (bytes and expert counts in VRAM and in host memory).
 
+Adaptive swaps use copies by default. `EngineOptions::rebalance_fused_swap` opts into an in-place GPU kernel exchanging
+the same slot bytes through the mapped host address; `fns-bench --rebalance-swap fused` enables it and
+`--rebalance-swap copy` selects the default. `fns-serve` and the Python server expose the same option
+(`--rebalance-swap fused|copy`, default `copy`). This option applies to the GGUF engine.
+`fns-swap-parity --model F.gguf` checks the exchange against the original bytes at the model's slot sizes and other sizes.
+
+Set `FNS_REBALANCE_TIMING=1` before starting the engine to collect CUDA event time for swap and pointer-table work.
+`Engine::placement()` exposes the accumulated milliseconds, calls with swaps, swaps, and logical bytes exchanged
+(both slots per swap, excluding pointer tables); `fns-bench` prints these totals with its adaptive-cache line. The event
+interval excludes routing-counter collection and includes any stream idle time between the first swap and final table
+upload. Without the variable, timing events and timing counters are disabled.
+
 ## Layers
 
 - Layers 0 and 1 are dense (FFN width 6144). The other layers are MoE.
@@ -109,8 +121,8 @@ These options change the numerical result, so outputs differ from the default. C
 
 Defaults: F16 global KV, no INT8 FlashAttention, no SWA FlashAttention, no MMA attention.
 
-Options that do not change bits: `rebalance_every` (expert placement) and `verify_cols` (speculation, which keeps
-the sequential result).
+Options that do not change bits: `rebalance_every` and `rebalance_fused_swap` (expert placement), and `verify_cols`
+(speculation, which keeps the sequential result).
 
 Quality is measured by `fns-kld` (KL divergence and top-1 agreement against a Q8_0 base) and `fns-verify`
 (parity and causality). Quality statements need those tools.

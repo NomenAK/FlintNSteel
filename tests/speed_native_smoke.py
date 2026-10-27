@@ -171,14 +171,23 @@ class Native:
         self.trace.close()
 
 
-def validate(prompt, tokens, done, width, budget, stops=()):
-    expected, coverage, windows = expected_counters(prompt, tokens, width, budget)
+def validate(prompt, tokens, done, width, budget, stops=(), adapt=False):
+    if adapt:
+        coverage, windows = set(), []
+    else:
+        expected, coverage, windows = expected_counters(prompt, tokens, width, budget)
+        for field, value in expected.items():
+            if type(done.get(field)) is not int or done[field] != value:
+                raise AssertionError(f"{field}: native={done.get(field)}, reconstructed={value}")
     if done.get("prompt_tokens") != len(prompt) or done.get("generated") != len(tokens):
         raise AssertionError("native prompt/generated counts differ from consumed IDs")
-    for field, value in expected.items():
-        if type(done.get(field)) is not int or done[field] != value:
-            raise AssertionError(f"{field}: native={done.get(field)}, reconstructed={value}")
-    if not 0 <= done["spec_accepted"] <= done["spec_drafted"] or done["spec_emitted"] > len(tokens) - 1:
+    for field in (*COUNTERS, "spec_skipped"):
+        if type(done.get(field)) is not int or done[field] < 0:
+            raise AssertionError(f"{field}: invalid native counter {done.get(field)}")
+    if not (done["spec_accepted"] <= done["spec_drafted"] and
+            done["spec_accepted"] <= done["spec_emitted"] <= len(tokens) - 1 and
+            done["spec_windows"] <= done["decode_iterations"] <= len(tokens) - 1 and
+            (len(tokens) == 1 or done["decode_iterations"] > 0)):
         raise AssertionError("native speculative counter invariants failed")
     reason = "stop" if tokens[-1] in stops else "length"
     if done.get("reason") != reason:
@@ -192,12 +201,14 @@ def validate(prompt, tokens, done, width, budget, stops=()):
     return coverage, windows
 
 
-def run_arm(args, quant, model, spec, cases, mode, seed, root):
-    name = f"{quant}-{mode}-{seed}-spec{spec}"
+def run_arm(args, quant, model, spec, cases, mode, seed, root, adapt=False):
+    name = f"{quant}-{mode}-{seed}-spec{spec}{'-adapt' if adapt else ''}"
     directory = root / name
     directory.mkdir()
     argv = [str(args.engine), "--model", str(model), "--ctx", str(args.ctx), "--ubatch", str(args.ubatch),
             "--spec", str(spec), "--spec-sample", str(min(spec, 2))]
+    if adapt:
+        argv.append("--spec-adapt")
     if quant == "q4":
         argv += ["--expert-profile", str(args.expert_profile)]
     native = Native(argv, directory, args.timeout)
@@ -214,7 +225,7 @@ def run_arm(args, quant, model, spec, cases, mode, seed, root):
             for state, cache in (("cold", False), ("cold_repeat", False), ("cached", True), ("default", None)):
                 body = {**base, **({} if cache is None else {"cache_prompt": cache})}
                 tokens, done = native.request(body)
-                coverage, windows = validate(prompt, tokens, done, width, args.max_tokens)
+                coverage, windows = validate(prompt, tokens, done, width, args.max_tokens, adapt=adapt)
                 covered.update(coverage)
                 if cache is False and done.get("reused") != 0:
                     raise AssertionError("cache_prompt=false reused native KV")
@@ -237,15 +248,15 @@ def run_arm(args, quant, model, spec, cases, mode, seed, root):
                 raise AssertionError("explicit/default cached output changed")
         # A one-token budget checks zero post-first counters even if its ID is a declared stop.
         first, done = native.request({"tokens": cases[0], "max_tokens": 1, "cache_prompt": False, "stop": [], **sampling})
-        validate(cases[0], first, done, width, 1)
+        validate(cases[0], first, done, width, 1, adapt=adapt)
         token, done = native.request({"tokens": cases[0], "max_tokens": 1, "cache_prompt": False,
                                       "stop": first, **sampling})
-        validate(cases[0], token, done, width, 1, first)
+        validate(cases[0], token, done, width, 1, first, adapt=adapt)
         if token != first:
             raise AssertionError("stop list changed token choice")
         stopped, done = native.request({"tokens": cases[0], "max_tokens": args.max_tokens,
                                         "cache_prompt": False, "stop": first, **sampling})
-        validate(cases[0], stopped, done, width, args.max_tokens, first)
+        validate(cases[0], stopped, done, width, args.max_tokens, first, adapt=adapt)
         if stopped != first:
             raise AssertionError("first-token stop did not terminate immediately")
         for index, position, target in probes[:3]:
@@ -255,7 +266,7 @@ def run_arm(args, quant, model, spec, cases, mode, seed, root):
                 reference = rows[index * 4]["token_ids"]
                 if tokens != reference[:len(tokens)]:
                     raise AssertionError("stop/budget probe changed the generated token prefix")
-                coverage, _ = validate(cases[index], tokens, done, width, budget, stops)
+                coverage, _ = validate(cases[index], tokens, done, width, budget, stops, adapt=adapt)
                 covered.update(coverage)
         return rows, covered
     finally:
@@ -273,6 +284,7 @@ def main():
     parser.add_argument("--ubatch", type=int, default=2048)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument("--spec-adapt", action="store_true", help="also check adaptive speculation token parity")
     parser.add_argument("--out-dir", type=Path, default=Path("perso/bench/speed/native-smoke"))
     args = parser.parse_args()
     for artifact in (args.engine, args.q3, args.q4, args.expert_profile, CHAT_TEMPLATE):
@@ -300,6 +312,11 @@ def main():
                 for a, b in zip(sequential, speculative, strict=True):
                     if (a["case"], a["state"], a["token_ids"]) != (b["case"], b["state"], b["token_ids"]):
                         raise AssertionError(f"{quant}/{mode}/{seed}: sequential/speculative token divergence")
+                if args.spec_adapt:
+                    adaptive, _ = run_arm(args, quant, getattr(args, quant), 3, cases, mode, seed, args.out_dir, adapt=True)
+                    for a, b in zip(sequential, adaptive, strict=True):
+                        if (a["case"], a["state"], a["token_ids"]) != (b["case"], b["state"], b["token_ids"]):
+                            raise AssertionError(f"{quant}/{mode}/{seed}: sequential/adaptive token divergence")
         required = {"no_draft", "full_acceptance", "budget_in_window"}
         optional = {"immediate_rejection", "partial_acceptance", "stop_in_window", "accepted_stop"}
         summary["quants"][quant] = {"covered": sorted(coverage), "missing_required": sorted(required - coverage),
