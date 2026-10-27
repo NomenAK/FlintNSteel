@@ -44,12 +44,15 @@ def fixture(profile="full", comparison="service", mode="greedy", examples=2, pai
         return ["{python}", "{fns_server}", "--model", "{model}", "--ctx", "{ctx}", "--spec", "0" if arm == "A" else "3", "--spec-sample", "0" if arm == "A" else "2", "--kv-global", "f16", "--log", "{metrics}", "--log-tokens", "--engine", "{fns_binary}", "--vocab", "{vocab}", "--port", "{port}"]
     llama = ["{llama_binary}", "--model", "{model}", "--ctx-size", "{ctx}", "--parallel", "1", "--port", "{port}", "--host", "127.0.0.1", "--jinja", "--chat-template-file", "{template}", "--metrics", "--slots", "--n-gpu-layers", "99", "--flash-attn", "on", "--cache-type-k", "f16", "--cache-type-v", "f16", "--n-cpu-moe", "12", "--moe-cache-mib", "2800"]
     hashes = {key: digest(key) for key in ("model", "tokenizer", "template", "protocol", "source_lock", "dependencies", "fns_binary", "llama_binary")}
+    hashes["execution_protocol"] = hashlib.sha256((ROOT / "bench/speed/execution-v2.json").read_bytes()).hexdigest()
     source = {"dirty": False, "patch_sha256": None, "snapshot_sha256": None, "source_tree_sha256": digest("source"), "build_recipe_sha256": digest("recipe")}
-    manifest = {"schema_version": 1, "run_id": "private-run-identity", "protocol_name": "FNS-SPEED v1", "profile": profile, "quant": "q3", "comparison": comparison, "mode": mode,
+    manifest = {"schema_version": 2, "run_id": "private-run-identity", "protocol_name": "FNS-SPEED v2", "profile": profile, "quant": "q3", "comparison": comparison, "mode": mode,
                 "seeds": seeds, "pairs": pairs, "max_tokens": 256, "ctx": 32768, "coverage": coverage,
                 "expected_requests": requests, "expected_request_ids": [row["request_id"] for row in requests], "protocol_sha256": hashes["protocol"],
+                "execution_protocol_sha256": hashes["execution_protocol"], "execution_protocol": copy.deepcopy(reporter.EXECUTION_PROTOCOL),
                 "preparation_sha256": digest("preparation"), "requests_sha256": digest("requests"), "source_lock_sha256": hashes["source_lock"], "reproducible": True,
                 "selection_sha256": digest("selection"), "warmup_sha256": digest("warmup"),
+                "environment_constraints": {"max_gpu_temperature_c": 80},
                 "effective_options": options, "public_provenance": {"commits": {"fns": "a" * 40, "llama": "b" * 40}, "hashes": hashes, "sources": {"fns": copy.deepcopy(source), "llama": copy.deepcopy(source)},
                 "machine": {"os": "Microsoft Windows 11 Pro", "gpu": "NVIDIA GeForce RTX 3090", "cpu": "GenuineIntel", "ram_bytes": 64 * 1024**3, "driver": "580.88", "cuda": "13.0", "msvc": "19.44"},
                 "options": {"A": fns("A") if comparison == "speculation" else llama, "B": fns("B")}}}
@@ -67,16 +70,62 @@ def fixture(profile="full", comparison="service", mode="greedy", examples=2, pai
                               "spec_accepted": 20 if arm == "B" else 0, "spec_emitted": 30 if arm == "B" else 0, "decode_iterations": 200 if arm == "B" else 255}
                     if not fns_arm:
                         native = {key: (1 if key == "prefill_ms" else 10 if key == "decode_ms" else None) for key in native}
-                    rows.append({"schema_version": 1, "run_id": manifest["run_id"], **request, "quant": "q3", "comparison": comparison, "mode": mode, "seed": seed, "pair": pair, "arm": arm,
+                    rows.append({"schema_version": 2, "run_id": manifest["run_id"], **request, "quant": "q3", "comparison": comparison, "mode": mode, "seed": seed, "pair": pair, "arm": arm,
                                  "attempt": 0, "replaces": None, "pair_generation": 0, "status": "ok", "error_code": None, "latency_ms": latency, "ttft_visible_ms": 1,
                                  "tpot_client_ms": .2, "delta_intervals_ms": [2, 4], "completion_tokens": 256, "prefilled_tokens": request["prompt_tokens"], "reused_tokens": 0, "finish_reason": "length",
                                  "output_tokens_sha256": digest(f"output-{index}-{seed}") if fns_arm else None, "metrics": native,
-                                 "startup_ms": 2, "warmup_ms": 3, "shutdown_ms": 4, "effective_options": copy.deepcopy(options)})
+                                 "effective_options": copy.deepcopy(options)})
                     rows[-1]["gpu_during_request"] = {"samples": 2, "valid_samples": 2, "active_samples": 1, "interval_ms": 200,
                                                       "pcie_gen_min": 4, "pcie_gen_max": 4, "pcie_width_min": 16, "pcie_width_max": 16,
                                                       "memory_used_mib_max": 22000, "temperature_c_max": 60,
                                                       "power_draw_watts_max": 300, "utilization_percent_max": 100}
+    inventory = {request["request_id"]: (request["config"], request["category"], request["prompt_tokens"]) for request in requests}
+    ordered, sessions = [], []
+    for block_id, ids in enumerate(reporter._blocks(inventory)):
+        for seed in seeds:
+            for pair in range(pairs):
+                for arm in (("A", "B") if (block_id + pair) % 2 == 0 else ("B", "A")):
+                    sid = f"private-session-{block_id}-{seed}-{pair}-{arm}-0"
+                    for rid in ids:
+                        row = next(row for row in rows if (row["request_id"], row["seed"], row["pair"], row["arm"]) == (rid, seed, pair, arm))
+                        row.update(block_id=block_id, block_generation=0, session_id=sid, observed_order=len(ordered))
+                        ordered.append(row)
+                    sessions.append({"schema_version": 2, "session_id": sid, "block_id": block_id, "block_generation": 0,
+                                     "seed": seed, "pair": pair, "arm": arm, "request_ids": list(ids), "status": "ok", "error_code": None,
+                                     "startup_ms": 2, "warmup_ms": 3, "shutdown_ms": 4, "environment_before": {},
+                                     "gpu_process_checks": [{"monotonic": 1, "result": {"gpu_state": {"temperature.gpu": "60", "driver_model.current": "WDDM"},
+                                                            "owned_pids": [1234], "gpu_processes": [{"pid": 1234, "path": r"C:\private\owned.exe", "type": "C"}]}}]})
+    manifest["_sessions"] = sessions
+    rows = ordered
     return manifest, rows
+
+def renumber(rows):
+    for index, row in enumerate(rows):
+        row["observed_order"] = index
+
+
+def retry_first_block(manifest, rows):
+    """Append a complete new generation for the first block/seed/repetition."""
+    old = [row for row in rows if (row["block_id"], row["seed"], row["pair"]) == (0, 0, 0)]
+    latest = {(row["request_id"], row["arm"]): row for row in old}
+    new = []
+    template = [session for session in manifest["_sessions"] if (session["block_id"], session["seed"], session["pair"]) == (0, 0, 0)]
+    new_sessions = copy.deepcopy(template[:2])
+    for session in new_sessions:
+        session.update(block_generation=1, session_id=session["session_id"] + "-retry", status="ok", error_code=None)
+        for rid in session["request_ids"]:
+            row = copy.deepcopy(next(row for row in old if row["request_id"] == rid and row["arm"] == session["arm"]))
+            previous = latest[(rid, session["arm"])]
+            row.update(attempt=previous["attempt"] + 1, replaces=previous["attempt"], block_generation=1, pair_generation=1,
+                       session_id=session["session_id"], status="ok", error_code=None)
+            new.append(row)
+    end = max(index for index, row in enumerate(rows) if row in old) + 1
+    rows[end:end] = new
+    session_end = max(index for index, session in enumerate(manifest["_sessions"]) if session in template) + 1
+    manifest["_sessions"][session_end:session_end] = new_sessions
+    renumber(rows)
+    return new, new_sessions
+
 
 
 class SpeedReportTests(unittest.TestCase):
@@ -90,7 +139,8 @@ class SpeedReportTests(unittest.TestCase):
     def save(self, manifest, rows, path=None):
         path = self.run_path if path is None else path
         path.mkdir(parents=True, exist_ok=True)
-        (path / "run-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (path / "run-manifest.json").write_text(json.dumps({key: value for key, value in manifest.items() if key != "_sessions"}), encoding="utf-8")
+        (path / "sessions.jsonl").write_text("".join(json.dumps(session) + "\n" for session in manifest["_sessions"]), encoding="utf-8")
         (path / "attempts.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         return path
 
@@ -102,6 +152,218 @@ class SpeedReportTests(unittest.TestCase):
             self.generate(manifest, rows)
         self.assertFalse((self.out / "report.json").exists())
         self.assertFalse((self.out / "report.md").exists())
+
+    def test_schema_two_protocol_hash_and_no_legacy_mixing(self):
+        for mutation in ("manifest_v1", "attempt_v1", "session_v1", "name", "hash", "provenance_hash", "protocol", "protocol_extra", "pair_order", "inventory_order"):
+            with self.subTest(mutation=mutation):
+                manifest, rows = fixture()
+                if mutation == "manifest_v1":
+                    manifest["schema_version"] = 1
+                elif mutation == "attempt_v1":
+                    rows[0]["schema_version"] = 1
+                elif mutation == "session_v1":
+                    manifest["_sessions"][0]["schema_version"] = 1
+                elif mutation == "name":
+                    manifest["protocol_name"] = "FNS-SPEED v1"
+                elif mutation == "hash":
+                    manifest["execution_protocol_sha256"] = digest("arbitrary-execution")
+                    manifest["public_provenance"]["hashes"]["execution_protocol"] = manifest["execution_protocol_sha256"]
+                elif mutation == "provenance_hash":
+                    manifest["public_provenance"]["hashes"]["execution_protocol"] = digest("different")
+                elif mutation == "protocol":
+                    manifest["execution_protocol"]["cache_prompt"] = True
+                elif mutation == "protocol_extra":
+                    manifest["execution_protocol"]["private"] = "ignored-extra"
+                elif mutation == "pair_order":
+                    manifest["pair_order"] = ["A", "B"]
+                else:
+                    manifest["expected_request_ids"].reverse()
+                self.invalid(manifest, rows)
+
+    def test_block_boundary_and_alternation_for_every_seed(self):
+        manifest, rows = fixture(examples=33, mode="sample")
+        result = self.generate(manifest, rows)
+        self.assertEqual(result["schema_version"], 2)
+        self.assertEqual(result["protocol"], "FNS-SPEED v2")
+        self.assertEqual(result["runs"][0]["sessions"]["total"], 40)
+        self.assertEqual(result["runs"][0]["sessions"]["lifecycle_summed_ms"], {"startup": 80, "warmup": 120, "shutdown": 160})
+        for block_id in (0, 1):
+            for seed in (0, 7):
+                for pair in range(5):
+                    sessions = [session for session in manifest["_sessions"] if (session["block_id"], session["seed"], session["pair"]) == (block_id, seed, pair)]
+                    self.assertEqual([session["arm"] for session in sessions], ["A", "B"] if (block_id + pair) % 2 == 0 else ["B", "A"])
+                    self.assertEqual(len(sessions[0]["request_ids"]), 32 if block_id == 0 else 1)
+        self.assertNotIn("lifecycle_summed_ms", result["runs"][0]["categories"][0]["arms"]["A"])
+
+    def test_session_membership_order_completion_and_costs_fail_closed(self):
+        for mutation in ("missing", "duplicate", "membership", "request_order", "partial", "arm_order", "row_order", "row_session", "block", "generation", "cost", "row_cost", "observed", "continue_after_error"):
+            with self.subTest(mutation=mutation):
+                manifest, rows = fixture()
+                sessions = manifest["_sessions"]
+                if mutation == "missing":
+                    sessions.pop()
+                elif mutation == "duplicate":
+                    sessions.append(copy.deepcopy(sessions[-1]))
+                elif mutation == "membership":
+                    sessions[0]["request_ids"] = sessions[0]["request_ids"][:1]
+                elif mutation == "request_order":
+                    sessions[0]["request_ids"].reverse()
+                elif mutation == "partial":
+                    rows.pop(1)
+                elif mutation == "arm_order":
+                    sessions[:2] = sessions[1::-1]
+                elif mutation == "row_order":
+                    rows[:2] = rows[1::-1]
+                    renumber(rows)
+                elif mutation == "row_session":
+                    rows[0]["session_id"] += "-other"
+                elif mutation == "block":
+                    rows[0]["block_id"] = 1
+                elif mutation == "generation":
+                    rows[0]["pair_generation"] = 1
+                elif mutation == "cost":
+                    sessions[0]["shutdown_ms"] = None
+                elif mutation == "row_cost":
+                    rows[0]["startup_ms"] = 2
+                elif mutation == "observed":
+                    rows[1]["observed_order"] = rows[0]["observed_order"]
+                else:
+                    rows[0].update(status="error", error_code="http")
+                    sessions[0].update(status="error", error_code="http")
+                    retry_first_block(manifest, rows)
+                self.invalid(manifest, rows)
+
+    def test_shutdown_failure_with_successful_rows_justifies_whole_block_retry(self):
+        manifest, rows = fixture()
+        manifest["_sessions"][1].update(status="error", error_code="process")
+        retry_first_block(manifest, rows)
+        result = self.generate(manifest, rows)["runs"][0]
+        self.assertEqual(result["attempts"]["failed"], 0)
+        self.assertEqual(result["sessions"]["failed_by_code"], {"process": 1})
+
+    def test_failed_block_generation_is_excluded_for_both_arms(self):
+        manifest, rows = fixture(examples=2)
+        expected = self.generate(manifest, rows)["runs"][0]["categories"][0]
+        manifest["_sessions"][1].update(status="error", error_code="process")
+        retry_first_block(manifest, rows)
+        for row in rows:
+            if row["pair"] == 0 and row["block_generation"] == 0:
+                row["latency_ms"] = 50000
+        actual = self.generate(manifest, rows)["runs"][0]["categories"][0]
+        self.assertEqual(actual, expected)
+
+    def test_same_generation_parity_invalidation_cannot_fabricate_failure(self):
+        manifest, rows = fixture(comparison="speculation")
+        invalidations = copy.deepcopy([rows[0], rows[2]])
+        for row in invalidations:
+            row.update(status="error", error_code="spec_parity", attempt=1, replaces=0)
+        rows[4:4] = invalidations
+        retry_first_block(manifest, rows)
+        self.invalid(manifest, rows)
+
+    def test_blocks_group_interleaved_categories_by_first_occurrence(self):
+        inventory = {"first": ("throughput_1k", "mixed", 1), "second": ("throughput_1k", "high_entropy", 1),
+                     "third": ("throughput_1k", "mixed", 1), "fourth": ("qualitative", "coding", 1)}
+        self.assertEqual(reporter._blocks(inventory), [["first", "third"], ["second"], ["fourth"]])
+
+    def test_crash_before_or_during_parity_invalidations_preserves_retry_evidence(self):
+        for recorded in (0, 1):
+            with self.subTest(recorded=recorded):
+                manifest, rows = fixture(comparison="speculation")
+                rows[2]["output_tokens_sha256"] = digest("mismatch")
+                if recorded:
+                    invalidation = copy.deepcopy(rows[0])
+                    invalidation.update(status="error", error_code="spec_parity", attempt=1, replaces=0)
+                    rows.insert(4, invalidation)
+                retry, _ = retry_first_block(manifest, rows)
+                for row in retry:
+                    if row["request_id"] == rows[0]["request_id"]:
+                        row["output_tokens_sha256"] = digest("matched-retry")
+                result = self.generate(manifest, rows)
+                self.assertEqual(result["runs"][0]["attempts"]["failed"], recorded)
+
+    def test_live_temperature_uses_declared_campaign_ceiling(self):
+        manifest, rows = fixture()
+        manifest["environment_constraints"]["max_gpu_temperature_c"] = 70
+        check = manifest["_sessions"][0]["gpu_process_checks"][0]["result"]
+        check["gpu_state"]["temperature.gpu"] = "71"
+        self.invalid(manifest, rows)
+        manifest["environment_constraints"]["max_gpu_temperature_c"] = 90
+        check["gpu_state"]["temperature.gpu"] = "81"
+        self.generate(manifest, rows)
+
+    def test_strict_live_monitor_allows_graphics_but_not_foreign_compute(self):
+        manifest, rows = fixture()
+        processes = manifest["_sessions"][0]["gpu_process_checks"][0]["result"]["gpu_processes"]
+        foreign = {"pid": 5678, "path": r"C:\private\graphics.exe", "type": "G"}
+        processes.append(foreign)
+        self.generate(manifest, rows)
+        for kind in ("C", "C+G"):
+            foreign["type"] = kind
+            with self.assertRaisesRegex(reporter.ReportError, "Unapproved live GPU process"):
+                self.generate(manifest, rows)
+
+    def test_malformed_provenance_returns_report_error(self):
+        for field in ("options", "artifacts", "python"):
+            with self.subTest(field=field):
+                manifest, rows = fixture()
+                if field == "options":
+                    manifest["public_provenance"]["options"]["A"] = [None]
+                else:
+                    manifest[field] = None
+                with self.assertRaises(reporter.ReportError):
+                    self.generate(manifest, rows)
+
+    def test_successful_sessions_require_safe_live_owned_process_monitor(self):
+        for mutation in ("missing", "empty", "malformed", "time", "error", "temperature", "owned", "unknown", "unlisted", "path", "duplicate"):
+            with self.subTest(mutation=mutation):
+                manifest, rows = fixture()
+                session = manifest["_sessions"][0]
+                check = session["gpu_process_checks"][0]
+                result = check["result"]
+                if mutation == "missing":
+                    session.pop("gpu_process_checks")
+                elif mutation == "empty":
+                    session["gpu_process_checks"] = []
+                elif mutation == "malformed":
+                    check["result"] = None
+                elif mutation == "time":
+                    session["gpu_process_checks"].append(copy.deepcopy(check))
+                elif mutation == "error":
+                    check["error"] = "private-monitor-failure"
+                elif mutation == "temperature":
+                    result["gpu_state"]["temperature.gpu"] = "81"
+                elif mutation == "owned":
+                    result["owned_pids"] = []
+                elif mutation == "unknown":
+                    result["gpu_processes"][0]["type"] = "N/A"
+                elif mutation == "unlisted":
+                    result["gpu_processes"][0]["pid"] = 5678
+                elif mutation == "path":
+                    result["gpu_processes"][0]["path"] = "owned.exe"
+                else:
+                    result["gpu_processes"].append(copy.deepcopy(result["gpu_processes"][0]))
+                self.invalid(manifest, rows)
+
+    def test_loaded_monitor_accepts_only_desktop_allowlist_without_idle_thresholds(self):
+        manifest, rows = fixture()
+        self.desktop_policy(manifest, rows)
+        result = manifest["_sessions"][0]["gpu_process_checks"][0]["result"]
+        result["gpu_state"].update({"memory.free": "0", "utilization.gpu": "100"})
+        result["gpu_processes"].append({"pid": 5678, "path": manifest["gpu_process_policy"]["allowed_graphics_paths"][0], "type": "G"})
+        self.generate(manifest, rows)
+        for mutation in ("compute", "model", "unlisted"):
+            with self.subTest(mutation=mutation):
+                altered = copy.deepcopy(manifest)
+                observed = altered["_sessions"][0]["gpu_process_checks"][0]["result"]
+                if mutation == "compute":
+                    observed["gpu_processes"][-1]["type"] = "C"
+                elif mutation == "model":
+                    observed["gpu_state"]["driver_model.current"] = "TCC"
+                else:
+                    observed["gpu_processes"][-1]["path"] = r"C:\unlisted.exe"
+                with self.assertRaises(ValueError):
+                    self.generate(altered, rows)
 
     def test_independent_statistics_and_nearest_rank(self):
         manifest, rows = fixture()
@@ -159,7 +421,7 @@ class SpeedReportTests(unittest.TestCase):
                 elif mutation == "option":
                     rows[0]["effective_options"]["cache_prompt"] = True
                 elif mutation == "null_metric":
-                    rows[1]["metrics"]["spec_accepted"] = None
+                    next(row for row in rows if row["arm"] == "B")["metrics"]["spec_accepted"] = None
                 elif mutation == "output":
                     rows[1]["completion_tokens"] -= 1
                 elif mutation == "kv":
@@ -219,46 +481,60 @@ class SpeedReportTests(unittest.TestCase):
             self.invalid(manifest, rows)
 
     def test_linked_retry_failures_visible_and_no_free_error_text(self):
-        manifest, rows = fixture(examples=1)
-        original = copy.deepcopy(rows[:2])
-        rows[1]["status"], rows[1]["error_code"] = "error", "timeout"
-        rows[1]["exception"] = "PRIVATE-FAILURE-TEXT"
-        retry = copy.deepcopy(original)
-        for row in retry:
-            row.update(attempt=1, replaces=0, pair_generation=1)
-        rows[2:2] = retry
+        manifest, rows = fixture(examples=2)
+        rows[3].update(status="error", error_code="timeout", error="PRIVATE-FAILURE-TEXT")
+        manifest["_sessions"][1].update(status="error", error_code="timeout", error="PRIVATE-FAILURE-TEXT")
+        retry_first_block(manifest, rows)
         result = self.generate(manifest, rows)
-        self.assertEqual(result["runs"][0]["attempts"], {"total": 12, "successful_final": 10, "failed": 1, "failed_by_code": {"timeout": 1}})
+        self.assertEqual(result["runs"][0]["attempts"], {"total": 24, "successful_final": 20, "failed": 1, "failed_by_code": {"timeout": 1}})
+        sessions = result["runs"][0]["sessions"]
+        self.assertEqual(sessions["total"], 12)
+        self.assertEqual(sessions["failed_by_code"], {"timeout": 1})
+        self.assertEqual(sessions["lifecycle_summed_ms"], {"startup": 24, "warmup": 36, "shutdown": 48})
         self.assertNotIn("PRIVATE-FAILURE-TEXT", (self.out / "report.json").read_text(encoding="utf-8"))
 
     def test_unlinked_unresolved_cherry_picked_and_mixed_generation_retries_fail(self):
-        for mutation in ("unlinked", "unresolved", "cherry_pick", "mixed", "skip_generation"):
+        for mutation in ("unlinked", "unresolved", "cherry_pick", "mixed", "skip_generation", "session_only", "rows_only", "same_generation"):
             with self.subTest(mutation=mutation):
-                manifest, rows = fixture(examples=1)
-                retry = copy.deepcopy(rows[:2])
-                for row in retry:
-                    row.update(attempt=1, replaces=0, pair_generation=1)
+                manifest, rows = fixture(examples=2)
                 if mutation != "cherry_pick":
-                    rows[1].update(status="error", error_code="timeout")
+                    manifest["_sessions"][1].update(status="error", error_code="process")
+                retry, sessions = retry_first_block(manifest, rows)
                 if mutation == "unlinked":
                     retry[0]["replaces"] = None
                 elif mutation == "unresolved":
-                    retry = []
+                    rows[:] = [row for row in rows if row not in retry]
+                    manifest["_sessions"][:] = [session for session in manifest["_sessions"] if session not in sessions]
                 elif mutation == "mixed":
-                    retry = retry[:1]
+                    rows.remove(retry[-1])
                 elif mutation == "skip_generation":
-                    retry[0]["pair_generation"] = 2
-                rows[2:2] = retry
+                    for row in retry:
+                        row.update(pair_generation=2, block_generation=2)
+                    for session in sessions:
+                        session["block_generation"] = 2
+                elif mutation == "session_only":
+                    rows[:] = [row for row in rows if row not in retry]
+                elif mutation == "rows_only":
+                    manifest["_sessions"][:] = [session for session in manifest["_sessions"] if session not in sessions]
+                elif mutation == "same_generation":
+                    for row in retry:
+                        row.update(pair_generation=0, block_generation=0)
                 self.invalid(manifest, rows)
 
-    def test_interrupted_missing_b_can_retry_as_whole_pair(self):
-        manifest, rows = fixture(examples=1)
-        retry = copy.deepcopy(rows[:2])
-        retry[0].update(attempt=1, replaces=0, pair_generation=1)
-        retry[1].update(pair_generation=1)
-        rows = rows[:1] + retry + rows[2:]
+    def test_interrupted_unfinalized_session_can_retry_only_as_whole_block(self):
+        manifest, rows = fixture(examples=2)
+        retry_first_block(manifest, rows)
+        rows[:] = [row for row in rows if not (row["pair"] == 0 and row["block_generation"] == 0 and row["arm"] == "B")]
+        # No finalized record for the interrupted first session or its unstarted second arm.
+        manifest["_sessions"][:] = [session for session in manifest["_sessions"] if not (session["pair"] == 0 and session["block_generation"] == 0)]
+        for row in rows:
+            if row["pair"] == 0 and row["block_generation"] == 1 and row["arm"] == "B":
+                row.update(attempt=0, replaces=None)
+        renumber(rows)
         result = self.generate(manifest, rows)
-        self.assertEqual(result["runs"][0]["attempts"]["total"], 11)
+        self.assertEqual(result["runs"][0]["attempts"]["total"], 22)
+        self.assertEqual(result["runs"][0]["sessions"]["unfinalized"], 1)
+        self.assertEqual(result["runs"][0]["sessions"]["total"], 10)
 
     def test_ablation_exact_hash_parity_for_every_seed_and_pair(self):
         for mode in ("greedy", "sample"):
@@ -272,19 +548,20 @@ class SpeedReportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "parity"):
                 self.generate(manifest, rows)
 
-    def test_recorded_parity_invalidation_then_linked_pair_retry(self):
-        manifest, rows = fixture(comparison="speculation", examples=1)
-        originals = copy.deepcopy(rows[:2])
-        rows[1]["output_tokens_sha256"] = digest("mismatch")
-        invalidations = copy.deepcopy(rows[:2])
+    def test_recorded_parity_invalidation_then_linked_whole_block_retry(self):
+        manifest, rows = fixture(comparison="speculation", examples=2)
+        rows[2]["output_tokens_sha256"] = digest("mismatch")
+        invalidations = copy.deepcopy([rows[0], rows[2]])
         for row in invalidations:
             row.update(status="error", error_code="spec_parity", attempt=1, replaces=0)
-        retry = copy.deepcopy(originals)
+        rows[4:4] = invalidations
+        retry, _ = retry_first_block(manifest, rows)
         for row in retry:
-            row.update(attempt=2, replaces=1, pair_generation=1)
-        rows[2:2] = invalidations + retry
+            if row["request_id"] == rows[0]["request_id"]:
+                row["output_tokens_sha256"] = digest("matched-retry")
         result = self.generate(manifest, rows)
         self.assertEqual(result["runs"][0]["attempts"]["failed_by_code"], {"spec_parity": 2})
+        self.assertEqual(result["runs"][0]["sessions"]["failed"], 0)
 
     def test_no_interengine_rng_parity_requirement(self):
         manifest, rows = fixture(mode="sample")
@@ -373,9 +650,14 @@ class SpeedReportTests(unittest.TestCase):
             row["request_id"] += secret
             row.update(messages=[{"role": "user", "content": secret}], token_ids=[123456789], question_id=secret)
         manifest["expected_request_ids"] = [row["request_id"] for row in manifest["expected_requests"]]
+        for session in manifest["_sessions"]:
+            session["request_ids"] = [rid + secret for rid in session["request_ids"]]
+            session["session_id"] += secret
+            session.update(raw_argv=[secret], log_path="C:/Users/PRIVATE-USER/" + secret, error=secret)
         for row in rows:
             row["run_id"] = secret
             row["request_id"] += secret
+            row["session_id"] += secret
             row.update(prompt=secret, output=secret, tokens=[123456789], source_metadata={"src_id": secret}, path="C:/Users/PRIVATE-USER/secret", finish_metadata=secret)
             row["metrics"]["stdout"] = secret
         for arm in ("A", "B"):
@@ -411,11 +693,13 @@ class SpeedReportTests(unittest.TestCase):
         for row in rows:
             row["gpu_process_policy"] = copy.deepcopy(policy)
             row["environment_before"] = copy.deepcopy(observed)
+        for session in manifest["_sessions"]:
+            session["environment_before"] = copy.deepcopy(observed)
 
     def test_desktop_session_policy_exports_only_label_counts_and_limitations(self):
         manifest, rows = fixture(profile="release", examples=1)
         self.desktop_policy(manifest, rows)
-        rows[0]["environment_before"]["permitted_graphics_processes"].append(
+        manifest["_sessions"][0]["environment_before"]["permitted_graphics_processes"].append(
             {"pid": 765432102, "path": manifest["gpu_process_policy"]["allowed_graphics_paths"][0], "type": "G"})
         result = self.generate(manifest, rows)
         summary = result["runs"][0]["gpu_process_policy"]
@@ -437,7 +721,7 @@ class SpeedReportTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 manifest, rows = fixture(examples=1)
                 self.desktop_policy(manifest, rows)
-                observed = rows[0]["environment_before"]
+                observed = manifest["_sessions"][0]["environment_before"]
                 context = observed["permitted_graphics_processes"][0]
                 if mutation == "mode":
                     manifest["gpu_process_policy"]["mode"] = "private-invalid-mode"
@@ -452,7 +736,7 @@ class SpeedReportTests(unittest.TestCase):
                 elif mutation == "missing_attempt_policy":
                     rows[0].pop("gpu_process_policy")
                 elif mutation == "missing_observation":
-                    rows[0].pop("environment_before")
+                    manifest["_sessions"][0].pop("environment_before")
                 elif mutation == "non_wddm":
                     observed["gpu_state"]["driver_model.current"] = "TCC"
                 elif mutation == "unlisted":

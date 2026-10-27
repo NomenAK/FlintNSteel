@@ -38,7 +38,8 @@ numerical output. It states current limits and contains no benchmark results.
 
 - Layers 0 and 1 are dense (FFN width 6144). The other layers are MoE.
 - Sliding-window layers use RoPE and a window of 513 positions. The ring keeps `ring` positions (default 1024;
-  at least 513, and enlarged to `513 + verify_cols - 1` when verification is enabled).
+  at least 513), enlarged as needed to cover `513 + ubatch - 1` for prefill and
+  `513 + verify_cols - 1` for verification.
 - Global layers keep the whole context in the KV cache.
 
 ## Decode

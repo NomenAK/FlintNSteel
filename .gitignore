@@ -11,6 +11,13 @@
 *.nsys-rep
 *.sqlite
 __pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.vscode/
+.idea/
+Thumbs.db
+*.log
 /build*/
 
 # Generated benchmark output (never tracked)

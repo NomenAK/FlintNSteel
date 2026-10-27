@@ -9,12 +9,12 @@ machine with an sm_86 GPU and the models. Their presence does not imply any resu
 
 ## Prerequisites
 
-- A successful build ([BUILD.md](BUILD.md)). Binaries are in `build\` (or `FNS_BUILD_DIR`).
+- For native test programs: a successful build ([BUILD.md](BUILD.md)). Binaries are in `build\` (or `FNS_BUILD_DIR`).
 - The Python packages from `requirements-test.txt` ([BUILD.md](BUILD.md#4-python-environment)).
 - For model-based tests: the GGUF model files in `FNS_MODELS` (see [USAGE.md](USAGE.md#models)).
-- For `kernel_parity.py` and `route_profile.py`: the llama.cpp checkout at `FNS_LLAMA_DIR`, for its `gguf-py` package.
-- For `fns-xgrammar-smoke` and the tokenizer-based tests: the vocabulary `FNS_MODELS\prof\flint-vocab.json`
-  ([USAGE.md](USAGE.md#tokenizer)).
+- For `kernel_parity.py` and `route_profile.py hits`: the llama.cpp checkout at `FNS_LLAMA_DIR`, for its `gguf-py` package.
+- For `fns-xgrammar-smoke`: the tokenizer and vocabulary `FNS_MODELS\prof\flint-vocab.json`
+  ([USAGE.md](USAGE.md#tokenizer)). The CPU unit tests use a small in-memory tokenizer instead.
 
 ## CPU tests
 
@@ -44,9 +44,17 @@ py -3.14 -m unittest discover -s tests -p "test_service.py" -v
 ```
 
 The suites cover deterministic selection and context eligibility, source/schema rejection, fragmented SSE
-and usage validation, cache-control/logging contracts, expected-pair completeness, statistics and allowlisted
-exports. Native cache behavior, GPU counter semantics and exact generated-token parity require the separate
-model-based check below; synthetic tests cannot establish them.
+and usage validation, cache-control/logging contracts, statistics and allowlisted exports. Execution-v2
+behavioral coverage must exercise deterministic blocks of up to 32 requests, alternating block/repetition
+arm order, one startup/warmup/shutdown per block-arm session, full cold-KV prefill on every request, and
+request-window telemetry from a session-lifetime sampler. Resume cases require whole-block-pair replacement
+after failure/interruption, linked attempt chains, generation-safe session membership, retained failures and
+speculation-parity invalidations. Reporting must reject incomplete blocks, mixed generations, incorrect
+order/membership and v1 execution artifacts, and count session overheads once rather than per request.
+These are lifecycle/behavior checks, not assertions about source-code text. The immutable v1 input protocol
+and source-lock/reacquisition tests remain applicable; execution schema v2 is a separate contract. Native
+cache behavior, GPU counter semantics and exact generated-token parity require the separate model-based
+check below; synthetic tests cannot establish them or any performance gain.
 
 ## FNS-SPEED native contract smoke
 
@@ -72,8 +80,12 @@ as covered. Raw requests, tokens and engine diagnostics remain private in the ou
 
 This check does not replace the real licensed-data smoke or release campaign. For those, follow
 [BENCHMARKING.md](BENCHMARKING.md): acquire and resolve authorized sources, prepare `--profile smoke --offline`,
-then check and run both quants and comparisons. A valid real smoke must observe both speculation and no-draft
-paths; a smoke report is always non-publishable as a release score. Neither recipe states that it has been run.
+then check and run both quants and comparisons with a schema-v2 campaign and a fresh run root. Verify that
+each measured request has zero reused tokens even when following another request in the same session, that
+warmup occurs only once per block arm, and that session overheads are separate from request timings. A valid
+real smoke must observe both speculation and no-draft paths; its report is always non-publishable as a release
+score. Preserve old v1 evidence separately; it is not v2 verification and must not be resumed or merged.
+Use the runner directly. Neither recipe states that it has been run.
 
 ## Live HTTP smoke test
 
@@ -199,5 +211,5 @@ FlintNSteel server and tests do not need it. The grammar that the server uses is
 - The tests check numerical parity with references and internal consistency. They do not measure task quality.
 - CI covers only the CPU unit tests and byte-compilation (see the top of this document). It does not cover CUDA kernels,
   the GPU, the native test programs, or model inference.
-- Parity tests use the models in `FNS_MODELS`; results depend on the exact GGUF files (SHA-256 in
-  [USAGE.md](USAGE.md#models)).
+- Parity tests use the models in `FNS_MODELS`; results depend on the exact GGUF files. The expected SHA-256
+  values are in `bench/scripts/fetch-models.py`.

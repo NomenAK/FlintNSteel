@@ -47,8 +47,8 @@ The script writes `flint-tokenizer.json` (a copy of the resolved file) and `flin
 
 ## Server
 
-The OpenAI-compatible server is `serve/fns_server.py`. It starts `build\fns-serve.exe` and exchanges JSON lines with it on
-stdin and stdout. It listens on `127.0.0.1` only.
+The OpenAI-compatible server is `serve/fns_server.py`. By default it starts `FNS_BUILD_DIR\fns-serve.exe`
+(`build\fns-serve.exe` when unset) and exchanges JSON lines with it on stdin and stdout. It listens on `127.0.0.1` only.
 
 ```powershell
 py -3.14 serve\fns_server.py --model models\flint-UD-Q3_K_XL.gguf --port 8080 --ctx 32768
@@ -72,7 +72,7 @@ Server options (`serve/fns_server.py`):
 | `--spec-sample` | native auto: `min(2, --spec)` | Sampled-request verification width; explicit `0` disables, otherwise `2..--spec` |
 | `--kv-global` | `f16` | `q8_0` is opt-in and changes the bits (see below) |
 | `--fa-int8`, `--fa-swa`, `--attention-mma` | off | Opt-in flags that change the bits (see below) |
-| `--engine` | `build\fns-serve.exe` | Engine binary, for A/B comparisons |
+| `--engine` | `FNS_BUILD_DIR\fns-serve.exe` (default `build\fns-serve.exe`) | Engine binary, for A/B comparisons |
 | `--vocab` | `FNS_MODELS\prof\flint-vocab.json` | Vocabulary for grammar constraints |
 | `--log` | none | JSON-lines log, one line per request |
 | `--log-tokens` | off | Requires `--log`; includes generated token IDs only in the private local log |
@@ -112,8 +112,9 @@ interchangeable with each other:
 | `--fa-swa` | FlashAttention for sliding-window prefill, visible tiles only | |
 | `--attention-mma` | MMA attention, decode and verification | GGUF only; requires F16 global KV (not `q8_0`) |
 
-Each option needs the matching flag on every tool that is compared against it (`fns-ref`, `fns-bench`, `fns-kld`,
-`fns-verify`). `fns_server.py` passes these flags to the engine.
+Use the same supported option set when comparing tools. `fns-ref` and `fns-bench` accept the flags above;
+`fns-kld` takes `--fa-int8 on` and `--fa-swa on` rather than bare flags. `fns-verify` supports
+`--kv-global` and `--attention-mma`, but not `--fa-int8` or `--fa-swa`. `fns_server.py` passes its flags to the engine.
 
 `serve/fns.py` (below) does not pass `--attention-mma`, `--fa-int8` or `--fa-swa`. Use `fns_server.py` for those.
 
@@ -142,12 +143,13 @@ Options:
 with an error when the profile is missing. Create it as described in [TESTING.md](TESTING.md#q4-routing-profile).
 
 `doctor` checks the NVIDIA GPU (compute capability 8.6), free VRAM (at least 20000 MiB, unless a FlintNSteel server is
-already loaded), the `fns-serve.exe` executable in `build\`, the model, the vocabulary, the chat template, the Python
-packages, the tokenizer, and `pi`. It exits with status 1 when any check fails.
+already loaded), `fns-serve.exe` in `FNS_BUILD_DIR` (default `build\`), the selected model, the Q4 profile when
+applicable, the vocabulary, the chat template, the Python packages, the tokenizer, and `pi`. It exits with status 1
+when any check fails.
 
 ## Native tools
 
-The engine binaries in `build\` take the same model options:
+The engine binaries in `build\` have tool-specific options:
 
 | Binary | Purpose |
 |---|---|
@@ -191,17 +193,22 @@ These scripts need caller-supplied inputs. They have no default trace, model or 
 
   ```powershell
   py -3.14 bench\scripts\agent_replay.py --name q3-agent-spec --trace T.jsonl --trace-log T.log.jsonl `
-      --model models\flint-UD-Q3_K_XL.gguf --fns "" --fns-b "--spec 3" --out OUT_DIR
+      --model models\flint-UD-Q3_K_XL.gguf --fns "--spec 0" --fns-b "--spec 3" --out OUT_DIR
   ```
 
   Replay uses `ignore_eos`, so it disables the tool grammar. Use it only for fixed-length replay.
 - `bench/scripts/route_profile.py` builds the Q4 routing profile and replays cache hit rates. See
   [TESTING.md](TESTING.md#q4-routing-profile).
-- `bench/scripts/speed_prepare.py` and `bench/scripts/speed_bench.py` implement **FNS-SPEED v1 — adaptation of
-  SPEED-Bench, single-turn, concurrency 1**. Acquisition requires explicit license consent; preparation is
-  offline, and campaigns compare paired fresh processes through streaming HTTP. See
-  [BENCHMARKING.md](BENCHMARKING.md) for the full acquisition/check/run/report recipe, dependencies, privacy
-  boundary and interpretation limits. This is not an agent trace or an official SPEED-Bench score.
+- `bench/scripts/speed_prepare.py` and `bench/scripts/speed_bench.py` implement **FNS-SPEED v2 — adaptation of
+  SPEED-Bench, single-turn, concurrency 1**. Acquisition requires explicit license consent; preparation remains
+  offline under immutable `protocol-v1.json`, while `execution-v2.json` governs execution. A server handles
+  up to 32 prepared requests per block arm, with one warmup per session and alternating A/B order between
+  block repetitions. Weights stay warm; every measured request uses cold KV (`cache_prompt=false`) and full
+  prefill. Session startup/warmup/shutdown are accounted once, outside request latency. Resume replaces an
+  incomplete block pair in full, not individual successful rows. Do not resume or merge v1 execution artifacts.
+  See [BENCHMARKING.md](BENCHMARKING.md) for the acquisition/check/run/report
+  recipe, dependencies, privacy boundary and interpretation limits. This is not an agent trace or an official
+  SPEED-Bench score.
 
 Other scripts in `bench/scripts/` (`ab_*.py`, `kld.py`, `parity.py`, `exl3_dump.py`, `kld_exl3.py`) are not described
 here; read each script's header and `--help` output before use. Benchmarks that compare against llama.cpp need the pinned

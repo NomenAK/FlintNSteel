@@ -2,7 +2,7 @@
 
 ## Protocol and scope
 
-**FNS-SPEED v1 — adaptation of SPEED-Bench, single-turn, concurrency 1** is a paired HTTP performance
+**FNS-SPEED v2 — adaptation of SPEED-Bench, single-turn, concurrency 1** is a paired HTTP performance
 protocol for FlintNSteel and llama.cpp on Windows with an RTX 3090-class sm_86 GPU. It is **not an official
 SPEED-Bench score**, NVIDIA certification, or a directly comparable entry in the paper's tables. Different
 models, hardware, output budgets and concurrency invalidate such comparisons.
@@ -16,6 +16,17 @@ pass@k, training, multi-turn KV reuse, tool execution or time to solve an agent 
 including reasoning and special tokens, count toward that budget. There is no system prompt, tool definition
 or grammar. Ordinary inference defaults are unchanged.
 
+Input and execution versions are deliberately separate. [`protocol-v1.json`](../bench/speed/protocol-v1.json)
+is the **immutable acquisition/preparation definition**: keep its bytes, source-lock hashes, selection key,
+budgets and reacquisition procedure unchanged. [`execution-v2.json`](../bench/speed/execution-v2.json) defines
+the active persistent-block execution protocol. Its exact fields are `schema_version: 2`,
+`name: "FNS-SPEED v2"`, `block_size: 32`, `block_order: "config-category-prepared-order"`,
+`arm_order: "alternating-block-repetition"`, `server_lifetime: "block-arm"`,
+`warmup: "once-per-session"` and `cache_prompt: false`. Release and full campaigns still require at least
+five repetitions; smoke campaigns may use fewer. The input selection, token budget and parity gates are unchanged.
+Existing valid prepared inputs can be reused with their exact hashes; execution v2 alone does not require
+reacquisition or re-preparation. Recheck their provenance normally rather than changing the input definition.
+
 ## Pins and dependencies
 
 | Component | Immutable reference |
@@ -25,7 +36,8 @@ or grammar. Ordinary inference defaults are unchanged.
 | llama.cpp | `19ab5a5e65736a35437e6b1c0ccd6562fed01b1b` |
 | Flint tokenizer | `RecursiveSI/flint` at `2a247be0c0aec895ccb0ac7ca92229ec6df37288` |
 | GGUF source | `unsloth/flint-GGUF` at `20468edfc38ab43d6914cc88b08cbecb05d0fc62` |
-| Protocol | [`bench/speed/protocol-v1.json`](../bench/speed/protocol-v1.json) |
+| Input/preparation protocol (immutable) | [`bench/speed/protocol-v1.json`](../bench/speed/protocol-v1.json) |
+| Execution protocol | [`bench/speed/execution-v2.json`](../bench/speed/execution-v2.json) |
 | Python dependency lock | [`bench/speed/requirements.lock`](../bench/speed/requirements.lock) |
 
 The expected model SHA-256 values are:
@@ -35,9 +47,9 @@ UD-Q3_K_XL  91b8d85ab6ff7fb095d9a972f9afa6f3fa2b9acb642867a079f3e013ea3c350c
 UD-Q4_K_XL  63c2ecc461ca545134b670c660e76fa20f47240f8d39b6510bfd21c4dd6e072f
 ```
 
-Dataset files, external source files, tokenizer, template, Q4 routing profile, dependency lock, protocol,
-executables and relevant DLLs are hashed as well. A binary hash alone is not a build recipe: retain the exact
-FNS and llama.cpp commits, source modifications and the [build commands](BUILD.md). A dirty checkout must be
+Dataset files, external source files, tokenizer, template, Q4 routing profile, dependency lock, both protocol
+artifacts, executables and relevant DLLs are hashed as well. A binary hash alone is not a build recipe: retain
+the exact FNS and llama.cpp commits, source modifications and the [build commands](BUILD.md). A dirty checkout must be
 identified by its patch or source snapshot digest, not described as the clean upstream commit.
 
 See the [paper](https://arxiv.org/abs/2604.09557),
@@ -225,7 +237,7 @@ Parquet row order, Python's process-randomized `hash()`, output content, accepta
 | Profile | Selection | Permitted interpretation |
 |---|---|---|
 | `smoke` | One admissible example per category in requested configurations | Technical validation; never a release result |
-| `release` | All admissible qualitative rows; up to 32 admissible rows per throughput category; all six configurations | Standard FNS-SPEED v1 campaign |
+| `release` | All admissible qualitative rows; up to 32 admissible rows per throughput category; all six configurations | Standard FNS-SPEED v2 campaign, unchanged v1 input selection |
 | `full` | All admissible rows in requested configurations | Separately named expanded-coverage campaign |
 
 Coverage includes totals, admissible and selected counts, context exclusions, and actual Flint token-length
@@ -269,12 +281,16 @@ environment variable. Engine commands are argument arrays with controlled artifa
 
 Before `check`, fill every artifact's `{ "path": "...", "sha256": "..." }` entry using the actual file-byte
 SHA-256. Include both models, binaries, service Python source, tokenizer, template, vocabulary, profile,
-protocol, source lock, dependency lock and all relevant DLLs. In PowerShell, obtain a digest with
-`(Get-FileHash -Algorithm SHA256 <file>).Hash.ToLowerInvariant()`; do not use a digest of a path string.
+input protocol, execution protocol, source lock, dependency lock and all relevant DLLs. In PowerShell, obtain a
+digest with `(Get-FileHash -Algorithm SHA256 <file>).Hash.ToLowerInvariant()`; do not hash a path string.
 Record exact source commits and portable build recipes, plus the separate Q4 profile and llama.cpp calibration
 recipes. Replace example machine descriptions and environmental limits with your own predeclared conditions.
-The fixed protocol requires AB order, explicit generation/sampling options, timeouts and a hashed warmup.
-Source pins, hashes, preparation budgets and the selected input IDs are validated rather than guessed.
+The campaign uses `schema_version: 2`, retains `protocol` for the unchanged v1 input artifact and requires
+`execution_protocol` for the v2 artifact, each with path and SHA-256. Remove the obsolete `pair_order` field;
+arm order is determined by execution v2, not a configurable fixed AB override. The manifest records
+`protocol_name: "FNS-SPEED v2"`, the exact `execution_protocol` object and `execution_protocol_sha256`;
+public provenance includes `hashes.execution_protocol`. Explicit generation/sampling options, timeouts and
+a hashed warmup remain required. Source pins, hashes, preparation budgets and selected input IDs are validated.
 
 The example's `../../../` paths are intentionally correct **after copying it to**
 `perso/bench/speed/campaign.json`, not for executing it in `bench/speed/`. Set `FNS_MODELS` and `FNS_TOKENIZER`
@@ -282,17 +298,19 @@ to absolute local paths; the example uses `${FNS_MODELS}` and `${FNS_TOKENIZER}`
 `environment` object free of unnecessary credentials. Populate the initially empty `dlls` array with
 `path`/`sha256` objects for all runtime DLLs relevant to the builds. Ports 8091 (llama) and 8092 (FNS) must be
 free; stop any ordinary FNS launcher before the campaign. The runner itself owns process startup and shutdown.
-GPU-process isolation is strict by default. An explicitly configured WDDM desktop policy may permit only
-predeclared full executable paths whose observed contexts are graphical (`G` or `C+G`). It never automatically
-allows desktop processes: unlisted, pure-compute, unknown or unverifiable processes remain errors, and load,
-temperature and free-VRAM limits still apply. Record actual exceptions privately; public reports identify
-desktop-session measurements, not absolute GPU isolation, without exposing process paths or PIDs. Establish
-the allowlist and display/workload environment before measurement; no automatic process termination.
-Set the campaign's `gpu_process_policy` to `{"mode":"strict","allowed_graphics_paths":[]}` for strict
-exclusion (also the default when absent). Opt-in uses `mode: "wddm_desktop"` with a nonempty list of exact
-absolute Windows executable paths observed and reviewed before the campaign. No wildcards, basename-only
-matches or automatic additions. NVIDIA XML process types and the compute-process inventory must agree;
-unknown/missing classifications fail closed. Keep this machine-specific list in the private campaign JSON.
+GPU-process isolation is strict by default: before startup it excludes other compute processes; while the
+server is loaded it permits unowned graphics-only (`G`) contexts but rejects unowned `C` and `C+G` contexts.
+This is not absolute GPU isolation. Set `gpu_process_policy` to
+`{"mode":"strict","allowed_graphics_paths":[]}` (also the default when absent).
+
+The opt-in WDDM desktop policy permits predeclared full executable paths with graphical (`G` or `C+G`)
+contexts, including mixed compute/graphics contexts. Unlisted, pure-compute, unknown or unverifiable processes
+remain errors; load, temperature and free-VRAM limits still apply. Use `mode: "wddm_desktop"` with a nonempty
+list of exact absolute Windows executable paths observed and reviewed before the campaign. No wildcards,
+basename-only matches or automatic additions. NVIDIA XML process types and the compute-process inventory must
+agree; unknown/missing classifications fail closed. Keep the machine-specific list and observed exceptions
+private. Public reports identify desktop-session measurements without exposing paths or PIDs. Establish the
+policy and display/workload environment before measurement; no automatic process termination.
 
 The `sources` entries need the checked-out commit, recoverable repository URL and build recipe. Dirty source
 trees are snapshotted with patch/source-tree digests in private `raw/` artifacts. A recovery declaration is not
@@ -354,28 +372,49 @@ For a technical smoke, first prepare `--profile smoke --offline`, then point a s
 fewer repetitions, but its report remains NON-PUBLISHABLE. Do not replace the release selection with synthetic
 native-smoke prompts or hand-picked high-acceptance examples.
 
-To retry a failed or interrupted run, keep its original campaign unchanged and pass the matching quant,
-comparison and mode with `--resume <existing-run-directory>`. This explicitly appends linked attempts for
-failed/missing adjacent pairs, rerunning both arms, and preserves initial failures. There is no automatic
-invisible retry. Do not resume into a changed selection, budget or configuration. A report refuses missing,
-duplicate, unlinked or incompatible attempts before creating a valid export. Use a new review directory for
-each export and preserve the private inputs used to derive it.
+To retry a failed or interrupted v2 run, keep its original campaign unchanged and pass the matching quant,
+comparison and mode with `--resume <existing-run-directory>`. Resume is atomic at the **whole block pair**
+for a seed/repetition: skip only when both latest arm sessions are complete and successful and every request
+has valid latest rows in the same generation. Otherwise rerun all requests in both arms with a new block
+generation, including previously successful rows inside that incomplete/failed unit. Preserve old rows,
+session records and raw evidence, with explicit linked attempts; no invisible retry or cross-generation
+cherry-picking. A completed session alone is insufficient if parity has invalidated its request rows.
+Do not resume into a changed selection, budget or configuration. Use a new review directory per export.
+
+There is **no v1 execution/resume/report compatibility**: start a new schema-v2 campaign and run root, do not
+migrate or merge old attempts/sessions, and do not combine v1 and v2 results into one table. Historical code
+and private artifacts remain preserved separately. Invoke `speed_bench.py` directly as above.
 
 ## Isolation and timing
 
-The paired unit is `(quant, mode, configuration, category, example, seed, repetition)`. A publication campaign
-requires at least five pairs per example and seed. Arms are adjacent in the declared order, never concurrent
-on the GPU. Do not run the four matrix cells or other GPU workloads in parallel.
+The statistical pair remains `(quant, mode, configuration, category, example, seed, repetition)`; publication
+still requires at least five pairs per example and seed. Execution groups requests by `(configuration,
+category)` in first-occurrence order, then slices each group into blocks of **up to 32** in prepared order.
+Block IDs start at zero. Loop over block, seed, then repetition (`pair`, zero-based). Use A then B when
+`(block_id + pair) % 2 == 0`, otherwise B then A. Both arms traverse exactly the same request order. The two
+block arms are adjacent, not each individual example's arms. Never overlap GPU servers or matrix cells.
 
-For **each arm of every example and repetition**, start a fresh process, wait for readiness, execute the fixed
-out-of-corpus warmup, then send the measured request. Warmup is defined and hashed in the campaign. Record
-startup, warmup and shutdown durations separately; they are not part of request latency. Stop and release the
-first process before starting the other arm. Warmup may affect the expert cache and filesystem cache; this
-protocol means cold request KV, not cold operating-system or hardware caches.
+For **each block arm, seed and repetition**, start one fresh server, wait for readiness, execute the fixed
+out-of-corpus benchmark warmup **once per session**, then measure the whole block sequentially without restarting
+or rewarming between requests. Engine startup may itself include an internal warmup. Finalize the session after
+shutdown, including on failure, and release that server before starting the other arm. Record startup, warmup and
+shutdown durations once in `sessions.jsonl`,
+outside request latency; never attach those costs to the first/last request or repeat them on every row.
 
+This is **KV-cold, weights-warm** measurement, not cold OS/hardware/expert caches. Loaded weights, allocations,
+filesystem caches and declared online expert-cache adaptation can persist within a block. Warmup and earlier
+requests can affect that state, which is why block membership/order and alternating arms are fixed and audited.
 The measured request sets `cache_prompt=false`. FNS's ordinary default remains `true`. Explicit `false`
 forces reuse to zero before prefill without removing the current prompt from lookup speculation's context.
-Require `reused=0` and the expected prefilled prompt length for each measured request, even after warmup.
+Require native reused-token count zero and the full expected prefilled prompt length on **every** measured
+request, including consecutive requests in the same session and the first request after warmup.
+
+**Analytic process-count formula, not a measured gain:** for one quant/comparison/mode, let `n_g` be the selected
+request count of each configuration/category group, `S` the number of seeds and `R` repetitions. Fresh
+per-request execution required `2*S*R*sum(n_g)` measured-arm server sessions; v2 requires
+`2*S*R*sum(ceil(n_g/32))` in a complete run without retries. These formulas exclude preflight tokenization
+checks and retries; they establish neither wall-clock savings nor inference throughput. Failed whole-block
+retries add sessions and requests.
 Never use an invalid request as a cache-reset trick. Native metrics are correlated through a separate local
 log using `X-Request-ID`, not timed console output. `--log-tokens` is opt-in, requires `--log`, and writes IDs
 only to that private log; it does not add token IDs to the HTTP response.
@@ -432,7 +471,7 @@ never a mean of request tokens/s.
 Category tables are mandatory. Do not mix quantizations, modes, profiles or length configurations into a
 single global multiplier. A configuration summary, when all categories are covered, may use the equal-category
 geometric mean `exp(sum(log(category_median_ratio))/category_count)` and must state that formula.
-A gain below 2%, or a win fraction below 80% (fewer than four of five pairs), is not called stable. These
+A ratio below 1.02, or a win fraction below 80% (fewer than four of five pairs), is not called a stable gain. These
 thresholds are a reporting convention, **not a statistical significance test**. Regressions remain visible.
 
 Declare environmental invalidation limits before measurement. Record CPU/RAM, GPU/free VRAM, driver,
@@ -440,7 +479,7 @@ Windows/WDDM, CUDA/MSVC, build architecture, power plan, display state, PCIe lin
 settings. Do not remove slow runs after seeing their latency.
 The manifest's initial PCIe generation/width snapshot is taken **before** requests, not verified under load;
 reports explicitly label it `pre_request_not_verified_under_load`. Separately, a read-only `nvidia-smi`
-sampler runs at a nominal 200 ms interval, started before warmup and retained through the measured request.
+sampler runs at a nominal 200 ms interval, started before warmup and stopped after the block's requests, before server shutdown.
 Only timestamped samples within the measured request window contribute to `gpu_during_request`; an active
 sample has observed GPU utilization greater than zero. Reports aggregate safe category/arm sample counts,
 active PCIe generation/width ranges and numeric memory/temperature/power/utilization observations. Missing or
@@ -455,16 +494,28 @@ as null with an explicit reason. Reader/shutdown failures invalidate attempts as
 Unsupported/nonnumeric rows remain private but are excluded from numeric summaries. Helper startup/shutdown
 are outside request duration; concurrent monitoring overhead can still influence measured latency.
 
+Before each block-arm session, inspect the full machine and require two seconds of stable idle state (250 ms
+polling). Environmental rejection has a ten-second cooldown and a maximum thirty-minute wait; failure is
+retained, not used to change the selected corpus. While the owned server is loaded, do not apply idle-GPU
+utilization or free-VRAM startup thresholds to its own work. Session monitoring still enforces the declared
+temperature ceiling (80 °C in the example campaign) and checks
+unapproved GPU processes every two seconds, excluding owned job processes. It does not repeat a full system
+fingerprint per request. The existing strict/explicit-WDDM policy and failure gates remain in force; no automatic
+termination of outside processes.
+
 Typed public provenance can include parsed CPU/GPU/Windows identity, architecture, driver mode, display state,
 standard power-plan enum, DLL digests and Python version. Unknown or unsafe free-text observations become
 null rather than being copied, so a null field is not evidence that the property was measured or absent.
 
 Timeout, OOM, HTTP/stream error, incomplete output, unexpected KV reuse, absent metrics, environmental failure,
-input-ID mismatch or FNS ablation-token divergence invalidates the affected pair. Preserve attempts and raw
-errors locally. There are no invisible retries; any replacement must explicitly link to the original attempt.
-A release report requires every expected request/seed/repetition/arm to have a valid final attempt and also
-shows aggregated initial failures. An engine failure is never a dataset exclusion. Smoke output is explicitly
-non-publishable; successful unit tests do not establish performance or replace a real two-engine smoke.
+input-ID mismatch or FNS ablation-token divergence invalidates the affected work and stops the run. Preserve
+attempts and raw errors locally. Speculation compares exact tokens between arms for each request; a mismatch
+appends linked same-generation `spec_parity` invalidations, even when sessions had completed successfully.
+There are no invisible retries; replacements explicitly link to the original attempts. A release report
+requires all expected request/seed/repetition/arm rows to be valid within complete matching block generations,
+verifies session membership and alternating order, and shows aggregated initial failures. An engine failure
+is never a dataset exclusion. Smoke output is explicitly non-publishable; unit tests do not establish
+performance or replace a real two-engine smoke.
 
 ## Local artifacts and public review
 
@@ -476,15 +527,27 @@ Each invocation creates a distinct run directory; do not append unrelated cells 
 | `prepared/PROFILE/selection.jsonl` | Private eligibility/selection records, identifiers, lengths and transformations |
 | `prepared/PROFILE/requests.jsonl` | Private normalized messages and prepared token IDs |
 | `prepared/PROFILE/preparation.json` | Preparation digests, aggregate coverage and reproducibility state |
-| `run-manifest.json` | Private commands as argv arrays, provenance, machine, options and expected request set |
-| `attempts.jsonl` | Private correlated attempts, timings, counters, status and output-token hashes |
-| `raw/` | Private engine logs, SSE traces and token-parity evidence |
+| `run-manifest.json` | Private schema-v2 commands/provenance, both protocols, machine/options and expected request set |
+| `attempts.jsonl` | Private schema-v2 request timings/counters/status, output-token hashes, `block_id`, `block_generation`, `session_id`; linked attempts and global `observed_order` |
+| `sessions.jsonl` | Private append-only schema-v2 block-arm lifecycle: complete request membership, generation/seed/repetition/arm, final status/environment/errors and startup/warmup/shutdown once |
+| `raw/` | Private engine logs, SSE traces and token-parity evidence; generation-safe session identities prevent filename collisions on resume |
 | `report.json`, `report.md` | Allowlisted aggregate export; review before publication |
 
 Manifests distinguish exact file-byte hashes from canonical-content hashes. Canonical JSON is UTF-8,
 `ensure_ascii=False`, sorted object keys, compact separators and no NaN. The source selection-key array retains
 its specified order. Offline re-preparation must preserve canonical messages, IDs and ordering; Parquet byte
 identity alone is not sufficient because serialization can change with libraries.
+
+Request rows carry `pair_generation == block_generation` only to preserve pairing semantics, not v1 execution
+compatibility. Session IDs are unique across generations; a successful block requires successful sessions and
+all member rows to be successful. Request rows do not contain `startup_ms`, `warmup_ms` or `shutdown_ms`; session
+`environment_before` is authoritative for admission. The public schema-v2 export exposes `runs[].sessions`
+with `total`, `successful`, `failed`, `failed_by_code`, `unfinalized` and
+`lifecycle_summed_ms: {startup, warmup, shutdown}`. Count each finalized session and its durations **once per
+run**, including retained failed/replaced sessions, never again in category/arm latency tables. Interrupted
+sessions without a finalized record are counted as `unfinalized`, without invented lifecycle durations.
+The reporter authenticates the exact shipped execution-v2 file hash against manifest/public provenance.
+Export only allowlisted aggregates, not session IDs, request membership, private paths, logs or raw errors.
 
 The public export must contain no prompts, decodable output, per-example identifiers, personal paths, raw
 exception strings or secrets. It should retain safe provenance, digests, declared options, selection rules,

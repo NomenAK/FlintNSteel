@@ -132,7 +132,7 @@ py -3.14 -m pip install -r requirements-test.txt
 - `requirements.txt` (included by `requirements-test.txt`): `tokenizers`, `jinja2`, `huggingface-hub`. Needed by the
   server, `serve/fns.py`, the Python tools and the CPU unit tests. Torch is not required.
 - `requirements-test.txt` adds `numpy`, needed by `tests/kernel_parity.py` and `bench/scripts/route_profile.py`.
-- `tests/kernel_parity.py` and `bench/scripts/route_profile.py` also import `gguf` from `gguf-py` in the pinned llama.cpp
+- `tests/kernel_parity.py` and `bench/scripts/route_profile.py hits` also import `gguf` from `gguf-py` in the pinned llama.cpp
   checkout (`FNS_LLAMA_DIR`). It is not installed by pip.
 - xgrammar is not installed here. The optional reference environment is in [TESTING.md](TESTING.md#optional-xgrammar-reference).
 

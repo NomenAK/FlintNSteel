@@ -1,4 +1,4 @@
-"""FNS-SPEED v1: private, sequential paired HTTP campaigns and reviewed exports.
+"""FNS-SPEED v2: private, persistent-block paired HTTP campaigns and reviewed exports.
 
 Run ``check``, ``run`` and ``report`` with --help. This module never downloads data.
 Campaign paths are relative to the campaign JSON; argv are arrays, never shell commands.
@@ -34,6 +34,10 @@ MODES = {"greedy": {"temperature": 0, "top_p": 1, "top_k": 0, "seeds": [0]},
 NEUTRAL = {"presence_penalty": 0, "frequency_penalty": 0, "repeat_penalty": 1,
            "min_p": 0, "typical_p": 1, "tfs_z": 1, "mirostat": 0,
            "dynatemp_range": 0, "xtc_probability": 0, "top_n_sigma": -1}
+EXECUTION_PROTOCOL = {"schema_version": 2, "name": "FNS-SPEED v2", "block_size": 32,
+                      "block_order": "config-category-prepared-order",
+                      "arm_order": "alternating-block-repetition", "server_lifetime": "block-arm",
+                      "warmup": "once-per-session", "cache_prompt": False}
 
 
 def digest(path):
@@ -96,11 +100,12 @@ def validate_campaign(path):
     path = Path(path).resolve()
     cfg = load_json(path)
     base = path.parent
-    require(cfg.get("schema_version") == 1, "Unsupported campaign schema")
+    require(cfg.get("schema_version") == 2, "Execution requires campaign schema 2")
+    require("pair_order" not in cfg, "Obsolete pair_order is not valid in execution v2")
     cfg["campaign_path"] = str(path)
     cfg["campaign_sha256"] = digest(path)
     cfg["gpu_process_policy"] = validate_gpu_process_policy(cfg.get("gpu_process_policy"))
-    for key in ("protocol", "dependencies", "tokenizer", "template", "vocab", "fns_binary", "llama_binary"):
+    for key in ("protocol", "execution_protocol", "dependencies", "tokenizer", "template", "vocab", "fns_binary", "llama_binary"):
         cfg[key] = artifact(cfg[key], base)
     protocol = load_json(cfg["protocol"]["path"])
     require(protocol.get("schema_version") == 1 and protocol.get("name") == "FNS-SPEED v1", "Unknown protocol")
@@ -108,11 +113,13 @@ def validate_campaign(path):
             and protocol.get("resolver", {}).get("revision") == "a4dfb916c8d4f958e11ff4dea8fd594f4ecc4260",
             "Unpinned dataset or resolver")
     cfg["protocol_data"] = protocol
+    execution = load_json(cfg["execution_protocol"]["path"])
+    require(execution == EXECUTION_PROTOCOL, "Unknown execution protocol")
+    cfg["execution_protocol_data"] = execution
     require(type(cfg.get("ctx")) is int and cfg["ctx"] > 0 and type(cfg.get("max_tokens")) is int
             and cfg["max_tokens"] > 0, "Explicit positive context and output budgets required")
     require(cfg["ctx"] == protocol["ctx"] and cfg["max_tokens"] == protocol["max_tokens"], "Campaign budgets differ from protocol")
     require(type(cfg.get("pairs")) is int and cfg["pairs"] > 0, "Positive integer pairs required")
-    require(cfg.get("pair_order") == ["A", "B"], "Protocol v1 requires adjacent fixed AB pairs")
     require(cfg.get("generation") == {"ignore_eos": True, "cache_prompt": False, "grammar": False,
                                       "penalties": "disabled", "llama_filters": "neutral"},
             "Explicit fixed-budget generation and neutral sampling filters required")
@@ -148,7 +155,7 @@ def validate_campaign(path):
         require(locked["reproducible"] is True,
                 "Release/full require independently reacquirable locked sources; only smoke permits local-only replay")
     if profile == "release":
-        require(cfg["ctx"] == 32768 and cfg["max_tokens"] == 256, "Release v1 budgets are fixed")
+        require(cfg["ctx"] == 32768 and cfg["max_tokens"] == 256, "Release budgets are fixed by input protocol v1")
         require(set(protocol["configs"]) == {c["config"] for c in prep["coverage"]}, "Release requires all six configurations")
     cfg["preparation"] = prep
     cfg["preparation_sha256"] = digest(prep_dir / "preparation.json")
@@ -358,6 +365,7 @@ def verify_llama_inputs(cfg, quant, raw_dir):
     server, _ = make_server(cfg, quant, "llama", 0, 0, raw_dir / f"parity-{quant}")
     records = []
     try:
+        wait_for_idle(cfg)
         server.start()
         with local_chat(cfg) as (chat, _):
             for row in cfg["requests"]:
@@ -413,8 +421,9 @@ def validate_gpu_process_policy(raw=None):
     return {"mode": raw["mode"], "allowed_graphics_paths": list(paths)}
 
 
-def _desktop_processes(smi, apps, fields, policy):
-    require(fields[10] == "WDDM", "Desktop GPU process policy requires WDDM", "environment")
+def _desktop_processes(smi, apps, fields, policy, owned_pids: set[int] | frozenset[int] = frozenset()):
+    if policy["mode"] == "wddm_desktop":
+        require(fields[10] == "WDDM", "Desktop GPU process policy requires WDDM", "environment")
     xml = command_output([smi, "-q", "-x"])
     try:
         root = ET.fromstring(xml)
@@ -425,7 +434,7 @@ def _desktop_processes(smi, apps, fields, policy):
             "Unknown nvidia-smi GPU XML schema", "environment")
     gpu = gpus[0]
     require(gpu.findtext("product_name") == fields[0] and root.findtext("driver_version") == fields[1]
-            and gpu.findtext("driver_model/current_dm") == "WDDM",
+            and gpu.findtext("driver_model/current_dm") == fields[10],
             "GPU XML identity or driver model differs from current query", "environment")
     groups = gpu.findall("processes")
     require(len(groups) == 1 and not (groups[0].text or "").strip(),
@@ -439,8 +448,15 @@ def _desktop_processes(smi, apps, fields, policy):
         pid, path, kind = (node.findtext(key) or "" for key in ("pid", "process_name", "type"))
         require(isinstance(pid, str) and re.fullmatch(r"[0-9]+", pid) is not None and int(pid) > 0
                 and int(pid) not in by_pid, "Missing or duplicate GPU process PID", "environment")
-        require(kind in ("G", "C+G"), "Pure compute or unknown GPU process type", "environment")
-        require(_graphics_path(path) in allowed, "Unlisted GPU graphical process", "environment")
+        if int(pid) in owned_pids:
+            require(kind in ("C", "C+G"), "Unknown owned GPU process type", "environment")
+            _graphics_path(path)
+        elif policy["mode"] == "strict":
+            require(kind == "G", "Other GPU compute or unknown process type", "environment")
+            _graphics_path(path)
+        else:
+            require(kind in ("G", "C+G"), "Pure compute or unknown GPU process type", "environment")
+            require(_graphics_path(path) in allowed, "Unlisted GPU graphical process", "environment")
         record = {"pid": int(pid), "path": path, "type": kind}
         records.append(record)
         by_pid[int(pid)] = record
@@ -455,7 +471,7 @@ def _desktop_processes(smi, apps, fields, policy):
                     and _graphics_path(path) == _graphics_path(by_pid[pid]["path"]),
                     "GPU process query and XML PID/path mismatch", "environment")
             queried[pid] = path
-    require(set(queried) == {record["pid"] for record in records if record["type"] == "C+G"},
+    require(set(queried) == {record["pid"] for record in records if record["type"] in ("C", "C+G")},
             "GPU compute-process query and typed XML membership differ", "environment")
     return records
 
@@ -529,20 +545,22 @@ def source_snapshot(source, destination):
 def create_manifest(cfg, directory, quant, comparison, mode):
     raw = directory / "raw"
     sources = {name: source_snapshot(source, raw / (name + "-source.zip")) for name, source in cfg["sources"].items()}
-    machine = inspect_machine(cfg)
+    machine = wait_for_idle(cfg)
     arms = {"A": "llama" if comparison == "service" else "fns", "B": "fns"}
     options = {arm: server_spec(cfg, quant, engine, 0 if arm == "A" else 3,
                                0 if arm == "A" else 2, raw / "symbolic", portable=True)[0]
                for arm, engine in arms.items()}
-    hashes = {name: cfg[name]["sha256"] for name in ("tokenizer", "template", "protocol", "dependencies", "fns_binary", "llama_binary")}
+    hashes = {name: cfg[name]["sha256"] for name in ("tokenizer", "template", "protocol", "execution_protocol", "dependencies", "fns_binary", "llama_binary")}
     hashes.update({"model": cfg["models"][quant]["artifact"]["sha256"],
                    "profile": cfg["models"][quant].get("profile", {}).get("sha256"), "source_lock": cfg["source_lock"]["sha256"]})
     expected = [{k: r[k] for k in ("request_id", "config", "category", "prompt_tokens")} for r in cfg["requests"]]
-    return {"schema_version": 1, "run_id": directory.name, "protocol_name": "FNS-SPEED v1", "profile": cfg["preparation"]["profile"],
+    return {"schema_version": 2, "run_id": directory.name, "protocol_name": "FNS-SPEED v2", "profile": cfg["preparation"]["profile"],
             "quant": quant, "comparison": comparison, "mode": mode, "seeds": cfg["sampling"][mode]["seeds"],
             "pairs": cfg["pairs"], "max_tokens": cfg["max_tokens"], "ctx": cfg["ctx"],
             "coverage": cfg["preparation"]["coverage"], "expected_request_ids": [r["request_id"] for r in expected],
             "expected_requests": expected, "protocol_sha256": cfg["protocol"]["sha256"],
+            "execution_protocol_sha256": cfg["execution_protocol"]["sha256"],
+            "execution_protocol": cfg["execution_protocol_data"],
             "preparation_sha256": cfg["preparation_sha256"], "requests_sha256": cfg["preparation"]["requests_sha256"],
             "source_lock_sha256": cfg["source_lock"]["sha256"], "campaign_sha256": cfg["campaign_sha256"],
             "selection_sha256": cfg["preparation"]["selection_sha256"],
@@ -550,8 +568,8 @@ def create_manifest(cfg, directory, quant, comparison, mode):
                 not s["dirty"] or (s.get("snapshot_repository") and s.get("published_snapshot_sha256") == s["snapshot_sha256"])
                 for s in sources.values())),
             "effective_options": effective_options(cfg, mode), "warmup": cfg["warmup"], "warmup_sha256": cfg["warmup_sha256"],
-            "pair_order": ["A", "B"], "arms": arms, "machine": machine, "sources": sources,
-            "artifacts": {**{key: cfg[key] for key in ("tokenizer", "template", "vocab", "fns_binary", "llama_binary", "fns_server", "dependencies", "dlls")},
+            "arms": arms, "machine": machine, "sources": sources,
+            "artifacts": {**{key: cfg[key] for key in ("tokenizer", "template", "vocab", "fns_binary", "llama_binary", "fns_server", "execution_protocol", "dependencies", "dlls")},
                           "model": cfg["models"][quant]},
             "environment": {key: value for key, value in os.environ.items() if key.startswith(("FNS_", "CUDA_", "HF_"))},
             "configured_environment": cfg["environment"], "environment_constraints": cfg["environment_constraints"],
@@ -608,77 +626,189 @@ def verify_metrics(row, capture, engine, metrics_path, correlation, spec):
 
 
 def empty_attempt(manifest, request, seed, pair, arm, attempt, replaces):
-    row = {"schema_version": 1, "run_id": manifest["run_id"], "request_id": request["request_id"],
+    row = {"schema_version": 2, "run_id": manifest["run_id"], "request_id": request["request_id"],
            "config": request["config"], "category": request["category"], "quant": manifest["quant"],
            "comparison": manifest["comparison"], "mode": manifest["mode"], "seed": seed, "pair": pair,
            "arm": arm, "attempt": attempt, "replaces": replaces, "status": "error", "error_code": None,
            "effective_options": manifest["effective_options"]}
     row["gpu_process_policy"] = manifest.get("gpu_process_policy", {"mode": "strict", "allowed_graphics_paths": []})
     for key in ("latency_ms", "ttft_visible_ms", "tpot_client_ms", "completion_tokens", "prompt_tokens", "reused_tokens",
-                "finish_reason", "output_tokens_sha256", "startup_ms", "warmup_ms", "shutdown_ms"):
+                "finish_reason", "output_tokens_sha256"):
         row[key] = None
     row["delta_intervals_ms"] = []
     row["metrics"] = {}
     return row
 
 
-def measure_arm(cfg, manifest, request, seed, pair, arm, attempt, replaces, directory, warmup_prompt_tokens):
-    row = empty_attempt(manifest, request, seed, pair, arm, attempt, replaces)
+def deterministic_blocks(requests, block_size=32):
+    groups = {}
+    for request in requests:
+        groups.setdefault((request["config"], request["category"]), []).append(request)
+    return [group[start:start + block_size] for group in groups.values()
+            for start in range(0, len(group), block_size)]
+
+
+def inspect_live_gpu(cfg, owned_pids=None):
+    """GPU-only checks; never impose idle/free-memory limits on our loaded server."""
+    smi = shutil.which("nvidia-smi")
+    require(smi is not None, "nvidia-smi unavailable", "environment")
+    query = "name,driver_version,memory.free,memory.total,temperature.gpu,utilization.gpu,pstate,power.limit,pcie.link.gen.current,pcie.link.width.current,driver_model.current,display_active"
+    lines = command_output([smi, "--query-gpu=" + query, "--format=csv,noheader,nounits"]).splitlines()
+    require(len(lines) == 1, "Exactly one visible GPU is required", "environment")
+    fields = [s.strip() for s in lines[0].split(",")]
+    require(len(fields) == 12, "Unexpected GPU telemetry schema", "environment")
+    rules = cfg["environment_constraints"]
+    require(float(fields[4]) <= rules["max_gpu_temperature_c"], "GPU temperature threshold exceeded", "environment")
+    if owned_pids is None:
+        require(float(fields[2]) >= rules["min_free_vram_mib"], "Insufficient free VRAM", "environment")
+        require(float(fields[5]) <= rules["max_idle_gpu_utilization_percent"], "Concurrent GPU load detected", "environment")
+    else:
+        require(bool(owned_pids), "Owned server process tree is empty", "environment")
+    apps = command_output([smi, "--query-compute-apps=pid,process_name", "--format=csv,noheader,nounits"])
+    policy = validate_gpu_process_policy(cfg.get("gpu_process_policy"))
+    records = []
+    if policy["mode"] == "strict" and owned_pids is None:
+        require(not apps.strip() or apps.strip().lower() == "no running processes found", "Other GPU compute processes present", "environment")
+    else:
+        records = _desktop_processes(smi, apps, fields, policy, owned_pids or set())
+    return {"gpu_state": dict(zip(query.split(","), fields)), "gpu_processes": records,
+            "owned_pids": sorted(owned_pids or set())}
+
+
+def wait_for_idle(cfg):
+    deadline = time.perf_counter() + 30 * 60
+    stable_since = None
+    last_error = None
+    while time.perf_counter() < deadline:
+        try:
+            inspect_live_gpu(cfg)
+            now = time.perf_counter()
+            if stable_since is None:
+                stable_since = now
+            if now - stable_since >= 2:
+                return inspect_machine(cfg)
+            time.sleep(min(0.25, max(0, deadline - now)))
+        except BenchError as exc:
+            if exc.code != "environment":
+                raise
+            stable_since, last_error = None, exc
+            time.sleep(min(10, max(0, deadline - time.perf_counter())))
+    raise BenchError("environment", "Idle/cooldown deadline exceeded: " + str(last_error or "GPU did not remain idle"))
+
+
+def measure_block_arm(cfg, manifest, requests, block_id, generation, seed, pair, arm,
+                      previous, directory, warmup_prompt_tokens, observed_order):
+    session_id = uuid.uuid4().hex
+    prefix = directory / "raw" / session_id
+    session = {"schema_version": 2, "session_id": session_id, "block_id": block_id,
+               "block_generation": generation, "seed": seed, "pair": pair, "arm": arm,
+               "request_ids": [r["request_id"] for r in requests], "status": "error",
+               "startup_ms": 0, "warmup_ms": 0, "shutdown_ms": 0, "environment_before": {},
+               "error_code": None, "error": None}
     engine = manifest["arms"][arm]
-    spec = 0 if arm == "A" else 3
-    spec_sample = 0 if arm == "A" else 2
-    key = f"{request['request_id']}-{seed}-{pair}-{arm}-{attempt}"
-    prefix = directory / "raw" / key
-    server, metrics = make_server(cfg, manifest["quant"], engine, spec, spec_sample, prefix)
-    sampler = None
-    measured_capture = None
+    spec, spec_sample = (0, 0) if arm == "A" else (3, 2)
+    server = sampler = None
+    rows = []
+    pending = None
+    phase = None
+    began = None
+
+    def persist(row):
+        row["observed_order"] = observed_order + len(rows)
+        append_attempts(directory / "attempts.jsonl", [row])
+        rows.append(row)
+
+    def next_row(request):
+        old = max((r for r in previous if (r["request_id"], r["seed"], r["pair"], r["arm"]) ==
+                   (request["request_id"], seed, pair, arm)), key=lambda r: r["attempt"], default=None)
+        row = empty_attempt(manifest, request, seed, pair, arm,
+                            old["attempt"] + 1 if old else 0, old["attempt"] if old else None)
+        row.update(block_id=block_id, block_generation=generation, pair_generation=generation, session_id=session_id)
+        return row
+
     try:
-        row["environment_before"] = inspect_machine(cfg)
-        row["argv"] = server.argv
+        pending = next_row(requests[0])
+        session["environment_before"] = wait_for_idle(cfg)
+        server, metrics = make_server(cfg, manifest["quant"], engine, spec, spec_sample, prefix)
+        session["argv"] = server.argv
+        phase, began = "startup_ms", time.perf_counter()
         server.start()
-        row["startup_ms"] = server.startup_ms
+        session[phase] = (time.perf_counter() - began) * 1000
+        phase = None
         smi = shutil.which("nvidia-smi")
-        if smi:
-            sampler = GPUStateSampler(smi, str(prefix) + ".gpu.jsonl")
-            sampler.start()
+        require(smi is not None, "nvidia-smi unavailable", "environment")
+        sampler = GPUStateSampler(smi, str(prefix) + ".gpu.jsonl",
+                                  monitor=lambda: inspect_live_gpu(cfg, server.owned_pids()),
+                                  max_temperature=cfg["environment_constraints"]["max_gpu_temperature_c"])
+        sampler.start()
         warmup = cfg["warmup"]
-        began = time.perf_counter()
+        phase, began = "warmup_ms", time.perf_counter()
         stream_request(server.url, request_body(cfg, warmup["messages"], "greedy", 0, warmup["max_tokens"]),
-                       key + ".warmup", warmup_prompt_tokens, warmup["max_tokens"], cfg["timeouts"]["request"], str(prefix) + ".warmup.sse")
-        row["warmup_ms"] = (time.perf_counter() - began) * 1000
-        result, capture = stream_request(server.url, request_body(cfg, request["messages"], manifest["mode"], seed),
-                                         key, request["prompt_tokens"], cfg["max_tokens"],
-                                         cfg["timeouts"]["request"], str(prefix) + ".sse")
-        row.update(result)
-        measured_capture = capture
-        verify_metrics(row, capture, engine, metrics, key, spec)
-        smi = shutil.which("nvidia-smi")
-        if smi:
-            row["gpu_after_request"] = command_output([smi, "--query-gpu=memory.used,memory.free,pcie.link.gen.current,pcie.link.width.current,temperature.gpu,pstate,power.draw", "--format=csv,noheader,nounits"])
-        row["status"] = "ok"
-    except KeyboardInterrupt:
-        row.update(error_code="interrupted", error="Interrupted by operator")
-    except Exception as exc:
-        row.update(error_code=exc.code if isinstance(exc, BenchError) else "other", error=f"{type(exc).__name__}: {exc}")
+                       session_id + ".warmup", warmup_prompt_tokens, warmup["max_tokens"],
+                       cfg["timeouts"]["request"], str(prefix) + ".warmup.sse")
+        session[phase] = (time.perf_counter() - began) * 1000
+        phase = None
+        for request in requests:
+            pending = next_row(request)
+            sampler.check()
+            correlation = f"{session_id}-{request['request_id']}-{pending['attempt']}"
+            result, capture = stream_request(server.url, request_body(cfg, request["messages"], manifest["mode"], seed),
+                                             correlation, request["prompt_tokens"], cfg["max_tokens"],
+                                             cfg["timeouts"]["request"], str(prefix) + "." + request["request_id"] + ".sse")
+            pending.update(result)
+            pending["gpu_during_request"] = sampler.summary(capture.started, capture.done)
+            verify_metrics(pending, capture, engine, metrics, correlation, spec)
+            sampler.check()
+            pending["status"] = "ok"
+            persist(pending)
+            pending = None
+        session["status"] = "ok"
+    except BaseException as exc:
+        if phase is not None and began is not None:
+            session[phase] = (time.perf_counter() - began) * 1000
+        code = "interrupted" if isinstance(exc, KeyboardInterrupt) else getattr(exc, "code", "other")
+        session.update(status="error", error_code=code, error=f"{type(exc).__name__}: {exc}")
+        if pending is not None:
+            pending.update(status="error", error_code=code, error=session["error"])
+            persist(pending)
     finally:
         try:
-            server.stop()
-        except Exception as exc:
-            row.update(status="error", error_code="process", error=f"Shutdown: {exc}")
-        row["shutdown_ms"] = server.shutdown_ms
-        if sampler is not None:
-            try:
+            if sampler is not None:
                 sampler.stop()
+                session["gpu_process_checks"] = sampler.monitor_samples
                 if sampler.error is not None:
-                    raise BenchError("environment", "GPU telemetry reader failed: " + sampler.error)
-                if measured_capture is not None and measured_capture.done is not None:
-                    row["gpu_during_request"] = sampler.summary(measured_capture.started, measured_capture.done)
-            except Exception as exc:
-                if row["error_code"] not in ("process", "interrupted"):
-                    row.update(status="error", error_code="environment", error=f"GPU telemetry: {exc}")
-                else:
-                    row["telemetry_error"] = str(exc)
-    return row
+                    raise BenchError("environment", sampler.error)
+        except BaseException as exc:
+            if session["error_code"] not in ("process", "interrupted"):
+                session.update(status="error", error_code="environment", error=f"GPU monitoring: {exc}")
+        finally:
+            if server is not None:
+                began_shutdown = time.perf_counter()
+                try:
+                    server.stop()
+                except BaseException as exc:
+                    session.update(status="error", error_code="process", error=f"Shutdown: {exc}")
+                finally:
+                    session["shutdown_ms"] = (time.perf_counter() - began_shutdown) * 1000
+            append_attempts(directory / "sessions.jsonl", [session])
+    return rows, session
+
+
+def block_complete(requests, rows, sessions, generation, speculation=False):
+    ids = [r["request_id"] for r in requests]
+    latest = {(r["request_id"], r["arm"]): r for r in sorted(rows, key=lambda r: r["attempt"])}
+    for arm in ("A", "B"):
+        finalized = [s for s in sessions if s["arm"] == arm and s["block_generation"] == generation]
+        if len(finalized) != 1 or finalized[0]["status"] != "ok" or finalized[0]["request_ids"] != ids:
+            return False
+        session = finalized[0]
+        for rid in ids:
+            row = latest.get((rid, arm))
+            if not row or row["status"] != "ok" or row["block_generation"] != generation or row["session_id"] != session["session_id"]:
+                return False
+    if speculation and any(latest[(rid, "A")]["output_tokens_sha256"] != latest[(rid, "B")]["output_tokens_sha256"] for rid in ids):
+        return False
+    return True
 
 
 def append_attempts(path, rows):
@@ -698,9 +828,15 @@ def run_campaign(cfg, quant, comparison, mode, resume=None):
     try:
         if resume:
             manifest = load_json(directory / "run-manifest.json")
+            require(manifest.get("schema_version") == 2 and manifest.get("execution_protocol") == EXECUTION_PROTOCOL,
+                    "Resume requires execution-v2 evidence")
+            require(manifest.get("execution_protocol_sha256") == cfg["execution_protocol"]["sha256"],
+                    "Resume execution protocol differs")
             require((manifest["quant"], manifest["comparison"], manifest["mode"], manifest["campaign_sha256"]) ==
                     (quant, comparison, mode, cfg["campaign_sha256"]), "Resume configuration differs from original campaign")
             previous = jsonl(directory / "attempts.jsonl") if (directory / "attempts.jsonl").exists() else []
+            sessions = jsonl(directory / "sessions.jsonl") if (directory / "sessions.jsonl").exists() else []
+            require(all(r.get("schema_version") == 2 for r in previous + sessions), "Mixed execution schemas")
             for name, source in cfg["sources"].items():
                 snapshot = source_snapshot(source, directory / "raw" / (name + "-resume-" + uuid.uuid4().hex + ".zip"))
                 require(snapshot["source_tree_sha256"] == manifest["sources"][name]["source_tree_sha256"],
@@ -711,7 +847,9 @@ def run_campaign(cfg, quant, comparison, mode, resume=None):
             manifest = create_manifest(cfg, directory, quant, comparison, mode)
             save_json(directory / "run-manifest.json", manifest)
             (directory / "attempts.jsonl").touch(exist_ok=False)
+            (directory / "sessions.jsonl").touch(exist_ok=False)
             previous = []
+            sessions = []
             shutil.copyfile(cfg["campaign_path"], directory / "campaign.json")
             shutil.copyfile(cfg["source_lock"]["path"], directory / "source-lock.json")
             for name in ("requests.jsonl", "selection.jsonl", "preparation.json"):
@@ -726,43 +864,44 @@ def run_campaign(cfg, quant, comparison, mode, resume=None):
             manifest.setdefault("preflight_failures", []).append({"error_code": getattr(exc, "code", "other"), "error": str(exc)})
             save_json(directory / "run-manifest.json", manifest)
             raise
-        had_error = False
-        observed_order = len(previous)
-        for request in cfg["requests"]:
+        observed_order = max((r["observed_order"] for r in previous), default=-1) + 1
+        blocks = deterministic_blocks(cfg["requests"], cfg["execution_protocol_data"]["block_size"])
+        for block_id, requests in enumerate(blocks):
             for seed in manifest["seeds"]:
                 for pair in range(cfg["pairs"]):
-                    existing = [r for r in previous if (r["request_id"], r["seed"], r["pair"]) == (request["request_id"], seed, pair)]
-                    latest = {arm: max((r for r in existing if r["arm"] == arm), key=lambda r: r["attempt"], default=None) for arm in ("A", "B")}
-                    if all(r and r["status"] == "ok" for r in latest.values()):
+                    existing = [r for r in previous if (r["block_id"], r["seed"], r["pair"]) == (block_id, seed, pair)]
+                    existing_sessions = [s for s in sessions if (s["block_id"], s["seed"], s["pair"]) == (block_id, seed, pair)]
+                    latest_generation = max((r["block_generation"] for r in existing + existing_sessions), default=-1)
+                    if block_complete(requests, existing, existing_sessions, latest_generation, comparison == "speculation"):
                         continue
-                    # Retry both adjacent arms explicitly; never mix a new arm with an old thermal state.
-                    rows = []
-                    generation = max((r.get("pair_generation", 0) for r in existing), default=-1) + 1
-                    for arm in ("A", "B"):
-                        old = latest[arm]
-                        row = measure_arm(cfg, manifest, request, seed, pair, arm, old["attempt"] + 1 if old else 0,
-                                          old["attempt"] if old else None, directory, warmup_prompt_tokens)
-                        row["pair_generation"] = generation
-                        rows.append(row)
-                        row["observed_order"] = observed_order
-                        observed_order += 1
-                        # Persist A before starting B: interrupted pairs remain visible and resumable.
-                        append_attempts(directory / "attempts.jsonl", [row])
-                        if row["error_code"] in ("process", "interrupted"):
+                    generation = latest_generation + 1
+                    arm_order = ("A", "B") if (block_id + pair) % 2 == 0 else ("B", "A")
+                    measured = {}
+                    for arm in arm_order:
+                        rows, session = measure_block_arm(cfg, manifest, requests, block_id, generation, seed, pair, arm,
+                                                          previous, directory, warmup_prompt_tokens, observed_order)
+                        observed_order += len(rows)
+                        previous.extend(rows)
+                        sessions.append(session)
+                        measured[arm] = {r["request_id"]: r for r in rows}
+                        if session["status"] != "ok":
                             return directory, False
-                    if comparison == "speculation" and all(r["status"] == "ok" for r in rows):
-                        if rows[0]["output_tokens_sha256"] != rows[1]["output_tokens_sha256"]:
-                            # Append linked invalidations, preserving the original evidence and exact outputs.
-                            for row in rows:
-                                invalid = {**row, "attempt": row["attempt"] + 1, "replaces": row["attempt"],
-                                           "status": "error", "error_code": "spec_parity", "error": "FNS sequential/speculative token sequence mismatch"}
-                                invalid["observed_order"] = observed_order
-                                append_attempts(directory / "attempts.jsonl", [invalid])
-                                observed_order += 1
-                            had_error = True
-                    had_error |= any(r["status"] != "ok" for r in rows)
-                    previous.extend(rows)
-        return directory, not had_error
+                    if comparison == "speculation":
+                        invalidations = []
+                        for request in requests:
+                            rows = [measured[arm][request["request_id"]] for arm in ("A", "B")]
+                            if rows[0]["output_tokens_sha256"] != rows[1]["output_tokens_sha256"]:
+                                for row in rows:
+                                    invalid = {**row, "attempt": row["attempt"] + 1, "replaces": row["attempt"],
+                                               "status": "error", "error_code": "spec_parity",
+                                               "error": "FNS sequential/speculative token sequence mismatch",
+                                               "observed_order": observed_order}
+                                    append_attempts(directory / "attempts.jsonl", [invalid])
+                                    invalidations.append(invalid)
+                                    observed_order += 1
+                        if invalidations:
+                            return directory, False
+        return directory, True
     finally:
         lock.unlink()
 
@@ -775,9 +914,13 @@ def acquire_gpu_lock(cfg):
     except FileExistsError as exc:
         raise BenchError("process", f"Campaign lock exists: {lock}; inspect owner before removing stale lock") from exc
     try:
-        os.write(descriptor, canonical({"pid": os.getpid(), "campaign": cfg["campaign_path"]}))
-    finally:
-        os.close(descriptor)
+        try:
+            os.write(descriptor, canonical({"pid": os.getpid(), "campaign": cfg["campaign_path"]}))
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        lock.unlink()
+        raise
     return lock
 
 
@@ -786,11 +929,10 @@ def check_campaign(cfg):
     directory = root / ("check-" + time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8])
     directory.mkdir(parents=True)
     lock = acquire_gpu_lock(cfg)
-    results = {"schema_version": 1, "campaign_sha256": cfg["campaign_sha256"],
+    results = {"schema_version": 2, "campaign_sha256": cfg["campaign_sha256"],
                "requests": len(cfg["requests"]), "status": "error"}
     try:
         results["warmup_prompt_tokens"] = verify_local_inputs(cfg)
-        inspect_machine(cfg)
         for quant in ("q3", "q4"):
             verify_llama_inputs(cfg, quant, directory)
         results["status"] = "ok"
@@ -798,13 +940,15 @@ def check_campaign(cfg):
         results.update(error_code=getattr(exc, "code", "other"), error=str(exc))
         raise
     finally:
-        save_json(directory / "check.json", results)
-        lock.unlink()
+        try:
+            save_json(directory / "check.json", results)
+        finally:
+            lock.unlink()
     return directory
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="FNS-SPEED v1 single-turn, concurrency-one paired HTTP benchmark")
+    parser = argparse.ArgumentParser(description="FNS-SPEED v2 persistent-block, concurrency-one paired HTTP benchmark")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("check", "run"):
         sub = commands.add_parser(name)
@@ -813,7 +957,7 @@ def main(argv=None):
             sub.add_argument("--quant", choices=("q3", "q4"), required=True)
             sub.add_argument("--comparison", choices=("service", "speculation"), required=True)
             sub.add_argument("--mode", choices=("greedy", "sample"), default="greedy")
-            sub.add_argument("--resume", type=Path, help="Explicitly retry failed/missing adjacent pairs, retaining linked history")
+            sub.add_argument("--resume", type=Path, help="Retry incomplete/error blocks in full, retaining linked history")
     report = commands.add_parser("report")
     report.add_argument("--run-dir", required=True, type=Path)
     report.add_argument("--out", required=True, type=Path)

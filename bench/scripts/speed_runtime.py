@@ -192,13 +192,15 @@ def stream_request(base_url, body, request_id, prompt_tokens, max_tokens, timeou
     except (UnicodeError, http.client.HTTPException, ConnectionError) as exc:
         raise BenchError("stream", str(exc)) from exc
     finally:
-        if capture is not None:
-            evidence = {"started_monotonic": capture.started, "done_monotonic": capture.done,
-                        "visible_monotonic": capture.visible, "usage": capture.usage,
-                        "finish_reason": capture.finish, "timings": capture.timings,
-                        "extensions": capture.extensions}
-            Path(str(raw_path) + ".capture.json").write_bytes(canonical(evidence) + b"\n")
-        conn.close()
+        try:
+            if capture is not None:
+                evidence = {"started_monotonic": capture.started, "done_monotonic": capture.done,
+                            "visible_monotonic": capture.visible, "usage": capture.usage,
+                            "finish_reason": capture.finish, "timings": capture.timings,
+                            "extensions": capture.extensions}
+                Path(str(raw_path) + ".capture.json").write_bytes(canonical(evidence) + b"\n")
+        finally:
+            conn.close()
 
 
 def json_request(base_url, endpoint, body=None, timeout=10):
@@ -223,6 +225,7 @@ class OwnedServer:
         self.log, self.startup_timeout, self.shutdown_timeout = log, startup_timeout, shutdown_timeout
         self.proc = None
         self.job = None
+        self.assigned = False
         self.handle = None
         self.startup_ms = self.shutdown_ms = None
 
@@ -262,8 +265,8 @@ class OwnedServer:
                 raise BenchError("process", "Cannot enable owned-child kill-on-close")
             self.proc = subprocess.Popen(self.argv, creationflags=0x00000004 | 0x00000200, **kwargs)
             if not kernel.AssignProcessToJobObject(self.job, int(getattr(self.proc, "_handle"))):
-                self.proc.kill()
                 raise BenchError("process", "Cannot own process tree through Windows job")
+            self.assigned = True
             ntdll = ctypes.WinDLL("ntdll")
             ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
             if ntdll.NtResumeProcess(int(getattr(self.proc, "_handle"))) != 0:
@@ -284,13 +287,31 @@ class OwnedServer:
             time.sleep(0.1)
         raise BenchError("startup", "Readiness deadline exceeded")
 
+    def owned_pids(self):
+        """Query the owned Windows job, including the native inference child."""
+        if self.job is None:
+            return {self.proc.pid} if self.proc is not None else set()
+        size = 4096
+        while size <= 1024 * 1024:
+            buffer = ctypes.create_string_buffer(size)
+            self.kernel.QueryInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                                             ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p]
+            if self.kernel.QueryInformationJobObject(self.job, 3, buffer, size, None):
+                count = ctypes.c_uint.from_buffer(buffer, 4).value
+                pids = (ctypes.c_size_t * count).from_buffer(buffer, 8)
+                return set(pids)
+            if ctypes.get_last_error() != 234:  # ERROR_MORE_DATA
+                raise BenchError("environment", "Cannot inspect owned GPU process tree")
+            size *= 2
+        raise BenchError("environment", "Owned process tree exceeds inspection budget")
+
     def stop(self):
         started = time.perf_counter()
         try:
             if self.job is not None:
                 if not self.kernel.TerminateJobObject(self.job, 1):
                     raise BenchError("process", "Failed to terminate owned Windows job")
-                if self.proc is not None:
+                if self.proc is not None and self.assigned:
                     self.proc.wait(timeout=self.shutdown_timeout)
                 # An empty job, not just a dead launcher, is required before the next arm starts.
                 class Accounting(ctypes.Structure):
@@ -315,15 +336,26 @@ class OwnedServer:
                 except ProcessLookupError:
                     pass
                 except subprocess.TimeoutExpired:
-                    getattr(os, "killpg")(self.proc.pid, getattr(signal, "SIGKILL"))
+                    pass
+                finally:
+                    try:
+                        getattr(os, "killpg")(self.proc.pid, getattr(signal, "SIGKILL"))
+                    except ProcessLookupError:
+                        pass
                     self.proc.wait(timeout=self.shutdown_timeout)
         finally:
-            if self.job is not None:
-                self.kernel.CloseHandle(self.job)
-                self.job = None
-            if self.handle is not None:
-                self.handle.close()
-            self.shutdown_ms = (time.perf_counter() - started) * 1000
+            try:
+                if self.proc is not None and not self.assigned and self.job is not None:
+                    if self.proc.poll() is None:
+                        self.proc.kill()
+                    self.proc.wait(timeout=self.shutdown_timeout)
+            finally:
+                if self.job is not None:
+                    self.kernel.CloseHandle(self.job)
+                    self.job = None
+                if self.handle is not None:
+                    self.handle.close()
+                self.shutdown_ms = (time.perf_counter() - started) * 1000
 
 
 class GPUStateSampler:
@@ -331,12 +363,17 @@ class GPUStateSampler:
     FIELDS = ("memory.used", "memory.free", "pcie.link.gen.current", "pcie.link.width.current",
               "temperature.gpu", "utilization.gpu", "pstate", "power.draw")
 
-    def __init__(self, executable, path):
+    def __init__(self, executable, path, monitor=None, max_temperature=None):
         self.executable, self.path = executable, Path(path)
         self.samples = []
         self.proc = None
         self.thread = None
         self.error = None
+        self.monitor, self.max_temperature = monitor, max_temperature
+        self.monitor_thread = None
+        self.monitor_samples = []
+        self.stopping = threading.Event()
+        self.monitor_ready = threading.Event()
 
     def start(self):
         self.proc = subprocess.Popen([self.executable, "--query-gpu=" + ",".join(self.FIELDS),
@@ -353,22 +390,60 @@ class GPUStateSampler:
                         values = [v.strip() for v in line.strip().split(",")]
                         record = {"monotonic": time.perf_counter(), "values": values}
                         self.samples.append(record)
+                        if self.max_temperature is not None:
+                            if len(values) != len(self.FIELDS):
+                                raise BenchError("environment", "Malformed live GPU telemetry")
+                            temperature = float(values[self.FIELDS.index("temperature.gpu")])
+                            if not math.isfinite(temperature) or temperature > self.max_temperature:
+                                raise BenchError("environment", "GPU temperature threshold exceeded during session")
                         output.write(canonical(record).decode("utf-8") + "\n")
                         output.flush()
             except Exception as exc:
                 self.error = str(exc)
         self.thread = threading.Thread(target=collect, name="speed-gpu-telemetry", daemon=True)
         self.thread.start()
+        if self.monitor is not None:
+            monitor = self.monitor
+            def monitor_processes():
+                while not self.stopping.is_set():
+                    try:
+                        result = monitor()
+                        self.monitor_samples.append({"monotonic": time.perf_counter(), "result": result})
+                    except Exception as exc:
+                        self.error = str(exc)
+                        self.monitor_ready.set()
+                        return
+                    self.monitor_ready.set()
+                    self.stopping.wait(2)
+            self.monitor_thread = threading.Thread(target=monitor_processes, name="speed-gpu-processes", daemon=True)
+            self.monitor_thread.start()
+            if not self.monitor_ready.wait(timeout=30):
+                raise BenchError("environment", "Initial GPU process inspection deadline exceeded")
+            self.check()
+
+    def check(self):
+        if self.error is not None:
+            raise BenchError("environment", "GPU monitoring failed: " + self.error)
+        if self.proc is not None and self.proc.poll() is not None:
+            raise BenchError("environment", "GPU telemetry process exited during session")
 
     def stop(self):
-        if self.proc is not None:
-            if self.proc.poll() is None:
-                self.proc.terminate()
-            self.proc.wait(timeout=10)
-        if self.thread is not None:
-            self.thread.join(timeout=10)
-            if self.thread.is_alive():
-                raise BenchError("environment", "GPU telemetry reader did not stop")
+        self.stopping.set()
+        try:
+            if self.proc is not None:
+                if self.proc.poll() is None:
+                    self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait(timeout=10)
+        finally:
+            for thread in (self.thread, self.monitor_thread):
+                if thread is not None:
+                    thread.join(timeout=10)
+                    if thread.is_alive():
+                        raise BenchError("environment", "GPU monitoring reader did not stop")
 
     def summary(self, started, done):
         samples = [r for r in self.samples if started <= r["monotonic"] <= done]

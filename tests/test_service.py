@@ -221,6 +221,21 @@ class NativeSmokeOracleTests(unittest.TestCase):
                 self.assertEqual(windows[-1]["last_accepted"], output[-1] != 9)
 
 
+class EngineStreamTests(unittest.TestCase):
+    def test_failed_request_write_clears_current_request(self):
+        class BrokenInput:
+            def write(self, line):
+                raise BrokenPipeError("engine exited")
+
+        engine = Engine.__new__(Engine)
+        engine.stdin = BrokenInput()
+        engine.lock = threading.Lock()
+        engine.next_id, engine.current = 0, None
+        with self.assertRaises(BrokenPipeError):
+            next(engine.stream([1], 1))
+        self.assertIsNone(engine.current)
+
+
 class ServiceContractTests(unittest.TestCase):
     """Exercise the HTTP consumer through Engine.stream, including final native metadata and private logging."""
 
@@ -307,6 +322,17 @@ class ServiceContractTests(unittest.TestCase):
                 self.post(cache_prompt=value)
             with error.exception as response:
                 self.assertEqual(response.code, 400)
+        self.assertEqual(self.requests, [])
+
+    def test_invalid_request_shapes_are_rejected(self):
+        for body in (None, [], "hello", {"messages": None}, {"messages": [None]},
+                     {"messages": [{"content": "hello"}], "max_tokens": []}):
+            with self.subTest(body=body):
+                request = Request(self.url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(request, timeout=5)
+                with error.exception as response:
+                    self.assertEqual(response.code, 400)
         self.assertEqual(self.requests, [])
 
     def test_stream_has_terminal_usage_and_flushed_private_correlation(self):

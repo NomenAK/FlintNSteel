@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "protocol": {"path": "../../../bench/speed/protocol-v1.json", "sha256": "REPLACE_WITH_FILE_SHA256"},
+  "execution_protocol": {"path": "../../../bench/speed/execution-v2.json", "sha256": "REPLACE_WITH_FILE_SHA256"},
   "dependencies": {"path": "../../../bench/speed/requirements.lock", "sha256": "REPLACE_WITH_FILE_SHA256"},
   "prepared_dir": "prepared/release",
   "source_lock": {"path": "source-lock.json", "sha256": "REPLACE_WITH_FILE_SHA256"},
@@ -21,7 +22,6 @@
   "ctx": 32768,
   "max_tokens": 256,
   "pairs": 5,
-  "pair_order": ["A", "B"],
   "generation": {"ignore_eos": true, "cache_prompt": false, "grammar": false, "penalties": "disabled", "llama_filters": "neutral"},
   "sampling": {
     "greedy": {"temperature": 0, "top_p": 1, "top_k": 0, "seeds": [0]},

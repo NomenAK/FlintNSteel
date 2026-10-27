@@ -5,6 +5,7 @@ copied into the public result. A report is a local review artifact, not an uploa
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import ntpath
@@ -20,6 +21,9 @@ ERROR_CODES = frozenset(("startup", "timeout", "http", "stream", "usage", "kv_re
 COUNTERS = ("spec_windows", "spec_drafted", "spec_accepted", "spec_emitted", "decode_iterations")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
+EXECUTION_PROTOCOL = {"schema_version": 2, "name": "FNS-SPEED v2", "block_size": 32,
+                      "block_order": "config-category-prepared-order", "arm_order": "alternating-block-repetition",
+                      "server_lifetime": "block-arm", "warmup": "once-per-session", "cache_prompt": False}
 
 
 class ReportError(ValueError):
@@ -132,7 +136,7 @@ def _arm_options(manifest, raw):
     portable, maps, launchers = {}, {}, {}
     for arm in ("A", "B"):
         argv = raw[arm]
-        _require(isinstance(argv, list), "Engine options must be arrays")
+        _require(isinstance(argv, list) and all(isinstance(value, str) for value in argv), "Engine options must be string arrays")
         launcher = ["{python}", "{fns_server}"] if arm == "B" or manifest["comparison"] == "speculation" else ["{llama_binary}"]
         prefix = launcher if argv[:len(launcher)] == launcher else []
         _require(bool(prefix) or not argv or argv[0].startswith("--"), "Nonportable engine launcher")
@@ -217,9 +221,10 @@ def _provenance(manifest):
     commits = raw.get("commits", {})
     _require(isinstance(commits, dict) and all(isinstance(commits.get(k), str) and HEX40.fullmatch(commits[k]) for k in ("fns", "llama")), "Missing source commits")
     hashes = raw.get("hashes", {})
-    required = ("model", "tokenizer", "template", "protocol", "source_lock", "dependencies", "fns_binary", "llama_binary")
+    required = ("model", "tokenizer", "template", "protocol", "execution_protocol", "source_lock", "dependencies", "fns_binary", "llama_binary")
     _require(isinstance(hashes, dict) and all(_hash(hashes.get(k)) for k in required), "Missing artifact hashes")
     _require(hashes["protocol"] == manifest["protocol_sha256"] and hashes["source_lock"] == manifest["source_lock_sha256"], "Inconsistent provenance hashes")
+    _require(hashes["execution_protocol"] == manifest["execution_protocol_sha256"], "Inconsistent execution protocol provenance hash")
     _require(manifest["quant"] != "q4" or _hash(hashes.get("profile")), "Missing Q4 routing profile hash")
     public_hashes = {key: hashes[key] for key in required}
     for key in ("profile", "fns_patch", "llama_patch", "fns_source", "llama_source", "warmup", "selection"):
@@ -241,10 +246,14 @@ def _provenance(manifest):
         _require(not source["dirty"] or _hash(source.get("snapshot_sha256")), "Modified sources require a recovery snapshot")
     options = raw.get("options", {})
     _require(isinstance(options, dict) and "A" in options and "B" in options, "Missing arm-specific engine options")
-    dlls = manifest.get("artifacts", {}).get("dlls", [])
+    artifacts = manifest.get("artifacts", {})
+    _require(isinstance(artifacts, dict), "Invalid artifacts")
+    dlls = artifacts.get("dlls", [])
     _require(isinstance(dlls, list) and all(isinstance(item, dict) and _hash(item.get("sha256")) for item in dlls), "Invalid DLL artifact hashes")
+    python = manifest.get("python", {})
+    _require(isinstance(python, dict) and isinstance(python.get("version", ""), str), "Invalid Python provenance")
     return {"commits": {key: commits[key] for key in ("fns", "llama")}, "hashes": public_hashes, "sources": safe_sources,
-            "dll_sha256": sorted(item["sha256"] for item in dlls), "python_version": _version(manifest.get("python", {}).get("version", "").split(" ")[0]),
+            "dll_sha256": sorted(item["sha256"] for item in dlls), "python_version": _version(python.get("version", "").split(" ")[0]),
             "machine": _machine(raw.get("machine"), manifest.get("machine")), "options": _arm_options(manifest, options), "build_recipe_reference": "docs/BENCHMARKING.md"}
 
 
@@ -339,24 +348,30 @@ def _gpu_observation(observed, policy):
     return len(records)
 
 
-def _public_gpu_policy(manifest, final):
+def _public_gpu_policy(manifest, sessions):
     policy = _gpu_policy(manifest.get("gpu_process_policy"))
     counts = []
     if "gpu_process_policy" in manifest or policy["mode"] == "wddm_desktop":
         counts.append(_gpu_observation(manifest.get("machine"), policy))
-        counts.extend(_gpu_observation(row.get("environment_before"), policy) for row in final.values())
+        counts.extend(_gpu_observation(session.get("environment_before"), policy) for session in sessions if session["status"] == "ok")
     desktop = policy["mode"] == "wddm_desktop"
     return {"mode": policy["mode"], "measurement_environment": "desktop-session" if desktop else "strict-preflight",
             "allowed_graphics_path_count": len(policy["allowed_graphics_paths"]),
             "permitted_context_count_max": max(counts, default=0),
-            "limitations": (["Explicitly allowlisted WDDM graphical contexts remained present; these are desktop-session measurements, not absolute GPU isolation."] if desktop else
+            "limitations": (["Explicitly allowlisted WDDM graphical contexts are permitted; these are desktop-session measurements, not absolute GPU isolation."] if desktop else
                             ["Strict preflight rejects reported compute contexts; it does not establish absolute GPU isolation."])
                            + ["Idle utilization, temperature and free-VRAM thresholds remain enforced before each arm; process observations do not prove absence of interference throughout the request."]}
 
 
 def _manifest(manifest):
-    _require(isinstance(manifest, dict) and type(manifest.get("schema_version")) is int and manifest["schema_version"] == 1, "Invalid manifest schema")
-    _require(manifest.get("protocol_name") == "FNS-SPEED v1", "Unknown protocol")
+    _require(isinstance(manifest, dict) and type(manifest.get("schema_version")) is int and manifest["schema_version"] == 2, "Invalid manifest schema; FNS-SPEED v2 required")
+    _require(manifest.get("protocol_name") == "FNS-SPEED v2", "Unknown protocol")
+    _require("pair_order" not in manifest and _canonical(manifest.get("execution_protocol")) == _canonical(EXECUTION_PROTOCOL), "Incompatible execution protocol")
+    try:
+        execution_hash = hashlib.sha256((Path(__file__).resolve().parents[1] / "speed" / "execution-v2.json").read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ReportError("Execution protocol artifact is unavailable") from exc
+    _require(manifest.get("execution_protocol_sha256") == execution_hash, "Execution protocol hash mismatch")
     for key, allowed in (("profile", ("smoke", "release", "full")), ("quant", ("q3", "q4")), ("comparison", ("service", "speculation")), ("mode", ("greedy", "sample"))):
         _require(manifest.get(key) in allowed, "Invalid campaign dimensions")
     _require(isinstance(manifest.get("run_id"), str) and manifest["run_id"], "Missing private run identity")
@@ -368,11 +383,13 @@ def _manifest(manifest):
     if manifest["profile"] != "smoke":
         _require(manifest["pairs"] >= 5 and manifest["reproducible"], "Publication requires five pairs and reproducible inputs")
     if manifest["profile"] == "release":
-        _require(manifest["ctx"] == 32768 and manifest["max_tokens"] == 256, "Release budgets differ from FNS-SPEED v1")
-    for key in ("protocol_sha256", "preparation_sha256", "requests_sha256", "source_lock_sha256", "selection_sha256", "warmup_sha256"):
+        _require(manifest["ctx"] == 32768 and manifest["max_tokens"] == 256, "Release budgets differ from FNS-SPEED v2")
+    for key in ("protocol_sha256", "execution_protocol_sha256", "preparation_sha256", "requests_sha256", "source_lock_sha256", "selection_sha256", "warmup_sha256"):
         _require(_hash(manifest.get(key)), "Missing reproducibility hash")
     coverage, options = _coverage(manifest), _effective(manifest)
     _gpu_policy(manifest.get("gpu_process_policy"))
+    constraints = manifest.get("environment_constraints")
+    _require(isinstance(constraints, dict) and _number(constraints.get("max_gpu_temperature_c")), "Missing or invalid GPU temperature ceiling")
     requests = manifest.get("expected_requests")
     ids = manifest.get("expected_request_ids")
     if not isinstance(requests, list) or not isinstance(ids, list):
@@ -386,7 +403,7 @@ def _manifest(manifest):
         _require(_integer(count, 1) and count + manifest["max_tokens"] <= manifest["ctx"], "Invalid expected prompt budget")
         inventory[rid] = (config, category, count)
         counts[(config, category)] += 1
-    _require(all(isinstance(rid, str) for rid in ids) and len(set(ids)) == len(ids) and set(ids) == set(inventory), "Inconsistent expected request identities")
+    _require(all(isinstance(rid, str) for rid in ids) and ids == list(inventory), "Inconsistent expected request identities or prepared order")
     _require(bool(inventory), "Campaign has no measurable examples")
     _require(counts == Counter({(row["config"], row["category"]): row["selected"] for row in coverage}), "Expected requests disagree with coverage")
     return coverage, options, inventory, _provenance(manifest)
@@ -394,8 +411,7 @@ def _manifest(manifest):
 
 def _successful(row, manifest, expected, fns):
     _require(row.get("error_code") is None, "Successful attempt carries an error")
-    for key in ("latency_ms", "startup_ms", "warmup_ms", "shutdown_ms"):
-        _require(_number(row.get(key), positive=key == "latency_ms"), "Missing successful duration")
+    _require(_number(row.get("latency_ms"), positive=True), "Missing successful duration")
     for key in ("ttft_visible_ms", "tpot_client_ms"):
         value = row.get(key)
         _require(key in row and (value is None or (_number(value) and value <= row["latency_ms"])), "Invalid streaming duration")
@@ -428,68 +444,221 @@ def _successful(row, manifest, expected, fns):
     return row
 
 
-def _attempts(path, manifest, inventory, options):
+def _live_gpu_checks(session, policy, max_temperature):
+    checks = session.get("gpu_process_checks")
+    _require(isinstance(checks, list) and bool(checks), "Successful session lacks live GPU process checks")
+    previous = -1
+    allowed = {ntpath.normcase(ntpath.normpath(path)) for path in policy["allowed_graphics_paths"]}
+    for check in checks:
+        _require(isinstance(check, dict) and _number(check.get("monotonic")) and check["monotonic"] > previous,
+                 "Invalid live GPU check order")
+        previous = check["monotonic"]
+        result = check.get("result")
+        if not isinstance(result, dict):
+            _fail("Missing live GPU process check result")
+        _require(check.get("error") is None and result.get("error") is None, "Failed live GPU process check in successful session")
+        state, owned, processes = (result.get(key) for key in ("gpu_state", "owned_pids", "gpu_processes"))
+        if not isinstance(state, dict):
+            _fail("Missing live GPU state")
+        try:
+            temperature = float(state["temperature.gpu"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ReportError("Missing live GPU temperature") from exc
+        _require(math.isfinite(temperature) and 0 <= temperature <= max_temperature, "Live GPU temperature exceeds declared ceiling")
+        _require(isinstance(owned, list) and bool(owned) and all(_integer(pid, 1) for pid in owned)
+                 and len(set(owned)) == len(owned), "Missing owned process identities")
+        if not isinstance(processes, list):
+            _fail("Missing live GPU process inventory")
+        seen = set()
+        for process in processes:
+            _require(isinstance(process, dict) and _integer(process.get("pid"), 1) and process["pid"] not in seen,
+                     "Invalid live GPU process identity")
+            seen.add(process["pid"])
+            path, kind = process.get("path"), process.get("type")
+            if not isinstance(path, str):
+                _fail("Missing live GPU process path")
+            _require(isinstance(path, str) and PureWindowsPath(path).is_absolute()
+                     and not any(c in path for c in '*?%${}\x00"')
+                     and not any(part in (".", "..") for part in re.split(r"[\\/]", path)), "Invalid live GPU process path")
+            if process["pid"] in owned:
+                _require(kind in ("C", "C+G"), "Invalid owned GPU process type")
+            else:
+                _require((policy["mode"] == "strict" and kind == "G")
+                         or (policy["mode"] == "wddm_desktop" and state.get("driver_model.current") == "WDDM"
+                             and kind in ("G", "C+G") and ntpath.normcase(ntpath.normpath(path)) in allowed),
+                         "Unapproved live GPU process")
+
+
+def _jsonl(path, label):
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
-        raise ReportError("Unreadable attempts") from exc
-    chains, failures = defaultdict(list), Counter()
-    generations = {}
+        raise ReportError("Unreadable " + label) from exc
+    result = []
     for line in lines:
-        _require(bool(line.strip()), "Empty attempt row")
+        _require(bool(line.strip()), "Empty " + label + " row")
         try:
             row = json.loads(line, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
         except ValueError as exc:
-            raise ReportError("Invalid attempt JSON") from exc
-        _require(isinstance(row, dict) and type(row.get("schema_version")) is int and row["schema_version"] == 1, "Invalid attempt schema")
+            raise ReportError("Invalid " + label + " JSON") from exc
+        _require(isinstance(row, dict) and type(row.get("schema_version")) is int and row["schema_version"] == 2, "Invalid " + label + " schema; FNS-SPEED v2 required")
+        result.append(row)
+    return result
+
+
+def _blocks(inventory):
+    groups = defaultdict(list)
+    for rid, expected in inventory.items():
+        groups[expected[:2]].append(rid)
+    return [ids[start:start + 32] for ids in groups.values() for start in range(0, len(ids), 32)]
+
+
+def _attempts(path, manifest, inventory, options):
+    blocks = _blocks(inventory)
+    membership = {rid: block_id for block_id, ids in enumerate(blocks) for rid in ids}
+    schedule = {(block_id, seed, pair): index for index, (block_id, seed, pair) in enumerate(
+        (block_id, seed, pair) for block_id in range(len(blocks)) for seed in manifest["seeds"] for pair in range(manifest["pairs"]))}
+    sessions = _jsonl(path.with_name("sessions.jsonl"), "session")
+    session_ids, arm_ids, evidence, session_order = {}, {}, defaultdict(set), []
+
+    def dimensions(row):
+        block_id, generation, seed, pair, arm = (row.get(key) for key in ("block_id", "block_generation", "seed", "pair", "arm"))
+        _require(_integer(block_id) and block_id < len(blocks) and _integer(generation)
+                 and type(seed) is int and _integer(pair) and (block_id, seed, pair) in schedule and arm in ("A", "B"), "Unexpected block/session dimension")
+        sid = row.get("session_id")
+        _require(isinstance(sid, str) and bool(sid), "Missing private session identity")
+        group = block_id, seed, pair
+        arm_key = (*group, generation, arm)
+        _require(arm_key not in arm_ids or arm_ids[arm_key] == sid, "Same-generation session mixing")
+        _require(sid not in session_ids or session_ids[sid] == arm_key, "Session identity reused across blocks or arms")
+        arm_ids[arm_key], session_ids[sid] = sid, arm_key
+        evidence[group].add(generation)
+        first_arm = "A" if (block_id + pair) % 2 == 0 else "B"
+        order = schedule[group], generation, int(arm != first_arm)
+        return group, generation, arm, sid, order
+
+    finalized, session_failures = {}, Counter()
+    for session in sessions:
+        group, generation, arm, sid, order = dimensions(session)
+        _require(sid not in finalized, "Duplicate finalized session")
+        _require(session.get("request_ids") == blocks[group[0]], "Session membership differs from complete ordered block")
+        _require(session.get("status") in ("ok", "error"), "Invalid finalized session status")
+        _require(all(_number(session.get(key + "_ms")) for key in ("startup", "warmup", "shutdown")), "Missing finalized session lifecycle duration")
+        _require(isinstance(session.get("environment_before"), dict), "Missing session environment evidence")
+        if session["status"] == "ok":
+            _require(session.get("error_code") is None, "Successful session carries an error")
+            _live_gpu_checks(session, _gpu_policy(manifest.get("gpu_process_policy")), manifest["environment_constraints"]["max_gpu_temperature_c"])
+            if "gpu_process_policy" in manifest:
+                _gpu_observation(session["environment_before"], _gpu_policy(manifest["gpu_process_policy"]))
+        else:
+            _require(session.get("error_code") in ERROR_CODES, "Invalid session failure code")
+            session_failures[session["error_code"]] += 1
+        finalized[sid] = session
+        session_order.append(order)
+    _require(session_order == sorted(session_order), "Sessions violate block, generation or alternating arm order")
+
+    chains, failures, originals, invalidations = defaultdict(list), Counter(), defaultdict(list), defaultdict(list)
+    measurement_order, previous_observed, previous_group_order = [], -1, (-1, -1)
+    for row in _jsonl(path, "attempt"):
         for key in ("run_id", "quant", "comparison", "mode"):
             _require(row.get(key) == manifest[key], "Attempt campaign mismatch")
-        rid, seed, pair, arm = (row.get(key) for key in ("request_id", "seed", "pair", "arm"))
+        rid = row.get("request_id")
         _require(isinstance(rid, str) and rid in inventory, "Unexpected request")
         expected = inventory[rid]
         _require((row.get("config"), row.get("category")) == expected[:2], "Attempt category mismatch")
-        _require(type(seed) is int and seed in manifest["seeds"] and _integer(pair) and pair < manifest["pairs"] and arm in ("A", "B"), "Unexpected pair dimension")
+        group, generation, arm, sid, order = dimensions(row)
+        block_id, seed, pair = group
+        _require(order[:2] >= previous_group_order, "Attempt block generation order moved backwards")
+        previous_group_order = order[:2]
+        _require(membership[rid] == block_id, "Attempt does not belong to its block")
+        _require(_integer(row.get("pair_generation")) and row["pair_generation"] == generation, "Pair/block generation mismatch")
+        observed = row.get("observed_order")
+        _require(_integer(observed) and observed > previous_observed, "Attempt observed order is not globally increasing")
+        previous_observed = observed
+        _require(not any(key in row for key in ("startup_ms", "warmup_ms", "shutdown_ms")), "Session lifecycle costs must not be copied into requests")
         _require(_canonical(row.get("effective_options")) == _canonical(options), "Attempt options differ from campaign")
         if "gpu_process_policy" in manifest or "gpu_process_policy" in row:
-            _require(_gpu_policy(row.get("gpu_process_policy")) == _gpu_policy(manifest.get("gpu_process_policy")),
-                     "Attempt GPU process policy differs from campaign")
-        _require(_integer(row.get("attempt")) and _integer(row.get("pair_generation")) and row.get("status") in ("ok", "error"), "Invalid attempt status or pair generation")
+            _require(_gpu_policy(row.get("gpu_process_policy")) == _gpu_policy(manifest.get("gpu_process_policy")), "Attempt GPU process policy differs from campaign")
+        _require(_integer(row.get("attempt")) and row.get("status") in ("ok", "error"), "Invalid attempt status")
         key = rid, seed, pair, arm
         chain = chains[key]
         _require(row["attempt"] == len(chain) and row.get("replaces") == (len(chain) - 1 if chain else None), "Duplicate, missing, or unlinked retry")
-        pair_key = rid, seed, pair
-        generation = row["pair_generation"]
-        previous_generation = generations.get(pair_key, -1)
-        opposite = chains.get((rid, seed, pair, "B" if arm == "A" else "A"), [])
-        if generation != previous_generation:
-            _require(generation == previous_generation + 1 and arm == "A", "Pair generations must advance adjacently from arm A")
-            _require(not chain or not opposite or chain[-1]["status"] == "error" or opposite[-1]["status"] == "error", "Valid pair was silently rerun")
-            generations[pair_key] = generation
-        elif arm == "B":
-            _require(bool(opposite) and opposite[-1]["pair_generation"] == generation, "Arm B is not adjacent to its generation A")
-        if chain:
+        invalidation = bool(chain and chain[-1]["block_generation"] == generation)
+        if invalidation:
             previous = chain[-1]
-            _require(generation >= previous["pair_generation"], "Retry generation moved backwards")
-            if generation == previous["pair_generation"]:
-                _require(previous["status"] == "ok" and row["status"] == "error" and row.get("error_code") == "spec_parity" and manifest["comparison"] == "speculation", "Unjustified same-generation replacement")
+            _require(previous["status"] == "ok" and row["status"] == "error" and row.get("error_code") == "spec_parity"
+                     and manifest["comparison"] == "speculation" and previous["session_id"] == sid, "Unjustified same-generation replacement")
+            invalidations[(rid, seed, pair, generation)].append(row)
+        else:
+            _require(not chain or generation > chain[-1]["block_generation"], "Retry generation moved backwards")
+            originals[sid].append(row)
+            measurement_order.append(order)
         if row["status"] == "error":
             _require(row.get("error_code") in ERROR_CODES, "Invalid failure code")
             failures[row["error_code"]] += 1
         else:
             _successful(row, manifest, expected, arm == "B" or manifest["comparison"] == "speculation")
         chain.append(row)
+    _require(measurement_order == sorted(measurement_order), "Requests violate block, generation or alternating arm order")
+    for rid, seed, pair, generation in invalidations:
+        hashes = []
+        for arm in ("A", "B"):
+            original = [row for row in chains[(rid, seed, pair, arm)] if row["block_generation"] == generation and row["status"] == "ok"]
+            _require(len(original) == 1, "Parity invalidation lacks original successful arm evidence")
+            hashes.append(original[0]["output_tokens_sha256"])
+        _require(hashes[0] != hashes[1], "Parity invalidation does not justify rerunning matching outputs")
+    for sid, measured in originals.items():
+        block_id = session_ids[sid][0]
+        _require([row["request_id"] for row in measured] == blocks[block_id][:len(measured)], "Session requests are missing, duplicated or out of prepared order")
+        _require(all(row["status"] == "ok" for row in measured[:-1]), "Session continued after a failed request")
+    for sid, session in finalized.items():
+        measured = originals[sid]
+        if session["status"] == "ok":
+            _require([row["request_id"] for row in measured] == session["request_ids"] and all(row["status"] == "ok" for row in measured), "Successful session lacks complete successful request rows")
+
+    def complete(group, generation):
+        block_id, seed, pair = group
+        output_hashes = {}
+        for arm in ("A", "B"):
+            sid = arm_ids.get((*group, generation, arm))
+            session = finalized.get(sid)
+            if session is None or session["status"] != "ok":
+                return False
+            for rid in blocks[block_id]:
+                rows = [row for row in chains[(rid, seed, pair, arm)] if row["block_generation"] == generation]
+                if not rows or rows[-1]["status"] != "ok" or rows[-1]["session_id"] != sid:
+                    return False
+                output_hashes[(rid, arm)] = rows[-1]["output_tokens_sha256"]
+        if manifest["comparison"] == "speculation":
+            if any(output_hashes[(rid, "A")] != output_hashes[(rid, "B")] for rid in blocks[block_id]):
+                return False
+        return True
+
+    _require(set(evidence) == set(schedule), "Incomplete expected block/seed/pair coverage")
+    for group, generations in evidence.items():
+        _require(sorted(generations) == list(range(max(generations) + 1)), "Block generations must advance adjacently from zero")
+        for generation in range(max(generations)):
+            _require(not complete(group, generation), "Valid block was silently rerun")
+        _require(complete(group, max(generations)), "Campaign contains an incomplete, failed or parity-invalid latest block generation")
+        for generation in generations:
+            first_arm = "A" if (group[0] + group[2]) % 2 == 0 else "B"
+            second_arm = "B" if first_arm == "A" else "A"
+            second_sid = arm_ids.get((*group, generation, second_arm))
+            if second_sid is not None:
+                first_sid = arm_ids.get((*group, generation, first_arm))
+                _require(first_sid in finalized and finalized[first_sid]["status"] == "ok", "Second arm lacks a successful finalized first session")
     expected_keys = {(rid, seed, pair, arm) for rid in inventory for seed in manifest["seeds"] for pair in range(manifest["pairs"]) for arm in ("A", "B")}
     _require(set(chains) == expected_keys, "Incomplete expected request/seed/pair/arm coverage")
-    _require(all(chain[-1]["status"] == "ok" for chain in chains.values()), "Campaign contains unresolved failed attempts")
     final = {key: chain[-1] for key, chain in chains.items()}
-    for rid, seed, pair, arm in final:
-        if arm == "A":
-            _require(final[(rid, seed, pair, "A")]["pair_generation"] == final[(rid, seed, pair, "B")]["pair_generation"], "Final pair arms came from different generations")
     if manifest["comparison"] == "speculation":
         for rid, seed, pair, arm in final:
             if arm == "A":
                 _require(final[(rid, seed, pair, "A")]["output_tokens_sha256"] == final[(rid, seed, pair, "B")]["output_tokens_sha256"], "FNS exact output parity failed")
-    return final, failures, sum(len(chain) for chain in chains.values())
+    summary = {"total": len(sessions), "successful": sum(session["status"] == "ok" for session in sessions),
+               "failed": sum(session_failures.values()), "failed_by_code": dict(sorted(session_failures.items())),
+               "unfinalized": len(set(session_ids) - set(finalized)),
+               "lifecycle_summed_ms": {key: sum(session[key + "_ms"] for session in sessions) for key in ("startup", "warmup", "shutdown")}}
+    return final, failures, sum(len(chain) for chain in chains.values()), sessions, summary
 
 
 def _gpu_summary(rows):
@@ -531,8 +700,7 @@ def _arm_summary(rows, fns):
               "throughput_tokens_per_second": _ratio(1000 * sum(row["completion_tokens"] for row in rows), sum(latency)),
               "ttft_visible_ms": {"p50": _nearest(ttft, .5), "p95": _nearest(ttft, .95), "unobserved": len(rows) - len(ttft), "null_reason": "no_visible_delta" if len(ttft) != len(rows) else None},
               "tpot_client_ms": {"p50": _nearest(tpot, .5), "p95": _nearest(tpot, .95), "unobserved": len(rows) - len(tpot)},
-              "sse_nonempty_delta_intervals_ms": {"count": len(intervals), "p50": _nearest(intervals, .5), "p95": _nearest(intervals, .95)},
-              "lifecycle_summed_ms": {key: sum(row[key + "_ms"] for row in rows) for key in ("startup", "warmup", "shutdown")}}
+              "sse_nonempty_delta_intervals_ms": {"count": len(intervals), "p50": _nearest(intervals, .5), "p95": _nearest(intervals, .95)}}
     result["gpu_during_request"] = _gpu_summary(rows)
     native = {}
     for key in ("prefill_ms", "decode_ms"):
@@ -575,12 +743,13 @@ def _categories(manifest, inventory, coverage, final):
 
 
 def _markdown(report):
-    lines = ["# FNS-SPEED v1", "", "Adaptation of SPEED-Bench, single-turn, concurrency 1.", "", "**" + report["publication_status"] + "**", "",
+    lines = ["# FNS-SPEED v2", "", "Adaptation of SPEED-Bench, single-turn, concurrency 1.", "", "**" + report["publication_status"] + "**", "",
              "This is not an official SPEED-Bench score or NVIDIA certification. Fixed-budget generation may pass a natural stopping point. No task quality, agent trace, tool-use, or cross-turn KV reuse is evaluated.", "",
              "Latency is measured through validated terminal SSE usage. TTFT is the first visible content/reasoning delta, not GPU prefill. SSE intervals are not per-token ITL. Native timings are engine-specific diagnostics; FNS decode begins after first-token selection.", "",
              "Category ratio: median across examples of median(A latency) / median(B latency), taking repetitions and declared seeds within each example. Quantiles use nearest rank. Throughput is sum(completion tokens) / sum(request seconds), request-duration weighted. No global speedup is reported. Stable gain requires ratio >= 1.02 and at least 80% paired wins; these are not significance tests.", ""]
     for index, run in enumerate(report["runs"], 1):
         lines += [f"## Run {index}: {run['quant']} / {run['comparison']} / {run['mode']} / {run['profile']}", "", f"{run['publication_status']}; {run['pairs_per_example_per_seed']} pairs per example/seed; {run['attempts']['failed']} initial/retried failures retained.", "",
+                  "Session lifecycle overhead (counted once per finalized session, including failures): " + json.dumps(run["sessions"], sort_keys=True) + ".", "",
                   "GPU process policy: " + run["gpu_process_policy"]["mode"] + "; " + run["gpu_process_policy"]["measurement_environment"] + "; " + str(run["gpu_process_policy"]["allowed_graphics_path_count"]) + " configured graphical paths; maximum " + str(run["gpu_process_policy"]["permitted_context_count_max"]) + " permitted contexts observed.", "",
                   *run["gpu_process_policy"]["limitations"], "", "| Configuration | Category | Examples | Pairs | A/B median ratio | B wins | Qualification | A p50/p95 ms | B p50/p95 ms | A/B tokens/s |", "|---|---|---:|---:|---:|---:|---|---|---|---|"]
         def fmt(value):
@@ -617,8 +786,8 @@ def generate_report(run_dir, out):
         _require(dimension not in dimensions and manifest["run_id"] not in run_ids, "Duplicate campaign dimensions or run identity")
         dimensions.add(dimension)
         run_ids.add(manifest["run_id"])
-        signature = _canonical({key: manifest[key] for key in ("profile", "protocol_sha256", "preparation_sha256", "requests_sha256", "source_lock_sha256", "selection_sha256", "warmup_sha256", "ctx", "max_tokens", "pairs")})
-        signature += _canonical({"coverage": coverage, "inventory": sorted((rid, *value) for rid, value in inventory.items())})
+        signature = _canonical({key: manifest[key] for key in ("profile", "protocol_sha256", "execution_protocol_sha256", "preparation_sha256", "requests_sha256", "source_lock_sha256", "selection_sha256", "warmup_sha256", "ctx", "max_tokens", "pairs")})
+        signature += _canonical({"coverage": coverage, "inventory": [(rid, *value) for rid, value in inventory.items()]})
         signature += _canonical(_gpu_policy(manifest.get("gpu_process_policy")))
         _require(campaign_signature is None or campaign_signature == signature, "Incompatible campaign collection")
         campaign_signature = signature
@@ -633,9 +802,9 @@ def generate_report(run_dir, out):
             arm_signature = _canonical({"options": provenance["options"][arm], "machine": machine_identity, "commits": provenance["commits"], "sources": provenance["sources"]})
             _require(key not in engine_signatures or engine_signatures[key] == arm_signature, "Incompatible engine options or machine within collection")
             engine_signatures[key] = arm_signature
-        final, failures, attempted = _attempts(path / "attempts.jsonl", manifest, inventory, options)
+        final, failures, attempted, sessions, session_summary = _attempts(path / "attempts.jsonl", manifest, inventory, options)
         categories = _categories(manifest, inventory, coverage, final)
-        gpu_policy = _public_gpu_policy(manifest, final)
+        gpu_policy = _public_gpu_policy(manifest, sessions)
         if manifest["profile"] != "smoke":
             for category in categories:
                 if category["examples"]:
@@ -646,11 +815,11 @@ def generate_report(run_dir, out):
                      "publication_status": "NON-PUBLISHABLE" if manifest["profile"] == "smoke" else "COMPLETE — PUBLICATION REVIEW REQUIRED",
                      "pairs_per_example_per_seed": manifest["pairs"], "effective_options": options,
                      "gpu_process_policy": gpu_policy,
-                     "reproducibility": {"inputs_reproducible": manifest["reproducible"], **{key: manifest[key] for key in ("protocol_sha256", "preparation_sha256", "requests_sha256", "source_lock_sha256", "selection_sha256", "warmup_sha256")}},
-                     "provenance": provenance, "coverage": coverage, "categories": categories,
+                     "reproducibility": {"inputs_reproducible": manifest["reproducible"], **{key: manifest[key] for key in ("protocol_sha256", "execution_protocol_sha256", "preparation_sha256", "requests_sha256", "source_lock_sha256", "selection_sha256", "warmup_sha256")}},
+                     "provenance": provenance, "coverage": coverage, "categories": categories, "sessions": session_summary,
                      "attempts": {"total": attempted, "successful_final": len(final), "failed": sum(failures.values()), "failed_by_code": dict(sorted(failures.items()))}})
     runs.sort(key=lambda run: tuple(run[key] for key in ("profile", "quant", "comparison", "mode")))
-    report = {"schema_version": 1, "protocol": "FNS-SPEED v1", "scope": "adaptation of SPEED-Bench, single-turn, concurrency 1",
+    report = {"schema_version": 2, "protocol": "FNS-SPEED v2", "scope": "adaptation of SPEED-Bench, single-turn, concurrency 1",
               "publication_status": "NON-PUBLISHABLE" if any(run["profile"] == "smoke" for run in runs) else "COMPLETE — PUBLICATION REVIEW REQUIRED",
               "statistics": {"latency_ratio": "median_across_examples_of_ratio_of_arm_medians_over_repetitions_and_seeds", "quantiles": "nearest_rank", "throughput": "sum_tokens_divided_by_sum_request_seconds", "stable_gain_min_ratio": 1.02, "stable_gain_min_paired_win_fraction": .8, "significance_test": False},
               "references": {"dataset": {"repository": "nvidia/SPEED-Bench", "revision": "fbd6dc64353a3153bf24252a113ebd6d2cff9dec"}, "resolver": {"repository": "NVIDIA/Model-Optimizer", "revision": "a4dfb916c8d4f958e11ff4dea8fd594f4ecc4260"}},

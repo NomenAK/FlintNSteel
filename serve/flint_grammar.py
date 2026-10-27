@@ -27,8 +27,8 @@ def _token(tokenizer, marker):
 
 
 def _parameters(function):
-    # xgrammar _get_function_parameters: strict is false or parameters are absent -> any object is accepted (True).
-    if function.get("strict") is False or function.get("parameters") is None:
+    # xgrammar accepts any object when strict is false; callers require an object parameter schema.
+    if function.get("strict") is False:
         return True
     return function["parameters"]
 

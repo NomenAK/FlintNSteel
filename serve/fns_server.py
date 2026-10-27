@@ -20,6 +20,7 @@ engine/src/rec_mlx/chat.py and chat_template.jinja), licensed under Apache-2.0.
 
 import argparse
 import bisect
+import contextlib
 import itertools
 import json
 import os
@@ -171,18 +172,34 @@ class Engine:
         if args.rebalance:
             cmd += ["--rebalance", str(args.rebalance)]
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
-        if self.p.stdin is None or self.p.stdout is None:
-            raise RuntimeError("fns-serve pipes missing despite stdin=PIPE, stdout=PIPE")
-        self.stdin: IO[str] = self.p.stdin
-        self.stdout: IO[str] = self.p.stdout
-        ready = json.loads(self.stdout.readline())
-        if ready.get("ready") is not True:
-            raise SystemExit("fns-serve failed to start")
+        try:
+            if self.p.stdin is None or self.p.stdout is None:
+                raise RuntimeError("fns-serve pipes missing despite stdin=PIPE, stdout=PIPE")
+            self.stdin: IO[str] = self.p.stdin
+            self.stdout: IO[str] = self.p.stdout
+            ready = json.loads(self.stdout.readline())
+            if ready.get("ready") is not True:
+                raise RuntimeError("fns-serve failed to start")
+        except BaseException:
+            self.close()
+            raise
         self.grammar = bool(ready.get("grammar"))
         self.lock = threading.Lock()
         self.ctx = args.ctx
         self.next_id = 0
         self.current = None  # id of the request in progress (cancellation)
+
+    def close(self):
+        if self.p.poll() is None:
+            self.p.terminate()
+            try:
+                self.p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.p.kill()
+                self.p.wait()
+        for pipe in (self.p.stdin, self.p.stdout):
+            if pipe is not None:
+                pipe.close()
 
     def stream(self, ids, max_tokens, grammar=None, sampling=None, ignore_eos=False, cache_prompt=True):
         """Yields tokens as they are generated; the last item is the final fns-serve message (dict)."""
@@ -197,9 +214,9 @@ class Engine:
         with self.lock:
             self.next_id += 1
             self.current = req["id"] = self.next_id
-            self.stdin.write(json.dumps(req) + "\n")
-            self.stdin.flush()
             try:
+                self.stdin.write(json.dumps(req) + "\n")
+                self.stdin.flush()
                 while True:
                     m = json.loads(self.stdout.readline())
                     if "token" in m:
@@ -311,6 +328,7 @@ class StreamSplitter:
 
 def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=False):
     log_lock = threading.Lock()
+    chat_lock = threading.Lock()
     if log_tokens and log is None:
         raise ValueError("log_tokens requires a local log")
 
@@ -334,7 +352,16 @@ def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=Fal
                 self.reply(404, {"error": "Unknown endpoint"})
                 return
             try:
-                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                length = int(self.headers.get("Content-Length", 0))
+                if length < 0:
+                    raise ValueError("Content-Length must be nonnegative")
+                req = json.loads(self.rfile.read(length))
+                if not isinstance(req, dict):
+                    raise ValueError("request body must be a JSON object")
+                if not isinstance(req.get("messages"), list) or not all(
+                    isinstance(message, dict) for message in req["messages"]
+                ):
+                    raise ValueError("messages must be an array of objects")
                 cache_prompt = req.get("cache_prompt", True)
                 if type(cache_prompt) is not bool:
                     raise ValueError("cache_prompt must be a boolean")
@@ -346,7 +373,8 @@ def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=Fal
                         record.write(json.dumps(req, ensure_ascii=False) + "\n")
                         record.flush()
                 tools = req.get("tools")
-                ids = chat.prompt_ids(req["messages"], tools)
+                with chat_lock:
+                    ids = chat.prompt_ids(req["messages"], tools)
                 # ignore_eos (as llama-server, to replay a trace at fixed length): no stop and no grammar.
                 ignore_eos = bool(req.get("ignore_eos"))
                 grammar = build_flint_glm_grammar(chat.tok, tools) if engine.grammar and not ignore_eos else None
@@ -369,7 +397,7 @@ def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=Fal
                     raise ValueError("max_tokens must be positive")
                 gen = engine.stream(ids, max_tokens, grammar, sampling, ignore_eos, cache_prompt=cache_prompt)
                 first = next(gen)  # prefill and first token: request errors are raised here
-            except (ValueError, KeyError, RuntimeError) as e:
+            except (ValueError, TypeError, KeyError, AttributeError, RuntimeError, OverflowError) as e:
                 self.reply(400, {"error": str(e)})
                 return
             cid, created = f"chatcmpl-{uuid.uuid4().hex}", int(time.time())
@@ -489,12 +517,15 @@ def main() -> None:
         ap.error("--spec-sample must be 0 or 2 to --spec")
     chat = Chat()
     engine = Engine(o)
-    log = open(o.log, "a", encoding="utf-8") if o.log else None
-    record = open(o.record, "a", encoding="utf-8") if o.record else None
-    server = ThreadingHTTPServer(("127.0.0.1", o.port),
-                                make_handler(chat, engine, Path(o.model).stem, log, record, o.log_tokens))
-    print(f"fns_server : http://127.0.0.1:{o.port}/v1", flush=True)
-    server.serve_forever()
+    try:
+        with (open(o.log, "a", encoding="utf-8") if o.log else contextlib.nullcontext()) as log, \
+             (open(o.record, "a", encoding="utf-8") if o.record else contextlib.nullcontext()) as record, \
+             ThreadingHTTPServer(("127.0.0.1", o.port),
+                                 make_handler(chat, engine, Path(o.model).stem, log, record, o.log_tokens)) as server:
+            print(f"fns_server : http://127.0.0.1:{o.port}/v1", flush=True)
+            server.serve_forever()
+    finally:
+        engine.close()
 
 
 if __name__ == "__main__":

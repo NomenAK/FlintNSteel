@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   cpu:
-    # CPU-only: no CUDA toolkit, no GPU, no model or Hugging Face download. Covers the Service unit tests and a
+    # CPU-only: no CUDA toolkit, no GPU, no model or Hugging Face download. Covers the CPU unit tests and a
     # byte-compile of the public Python files. The live HTTP smoke test (tests/http_smoke.py) needs a running
     # server with a GPU and is not run here.
     runs-on: windows-latest

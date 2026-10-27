@@ -25,7 +25,7 @@ It is not a general runtime. Other models, other GPU architectures, and other pl
 | [docs/USAGE.md](docs/USAGE.md) | Models, tokenizer, the server, the launcher, native tools |
 | [docs/ENGINE.md](docs/ENGINE.md) | Engine design, options, opt-in incompatibilities, limits |
 | [docs/TESTING.md](docs/TESTING.md) | CPU unit tests, the HTTP smoke test, GPU test programs, the Q4 routing profile and corpus, CI scope |
-| [docs/BENCHMARKING.md](docs/BENCHMARKING.md) | FNS-SPEED v1: licensed acquisition, offline preparation, paired HTTP campaigns and private-to-public reporting |
+| [docs/BENCHMARKING.md](docs/BENCHMARKING.md) | FNS-SPEED v2: immutable v1 inputs, licensed acquisition, offline preparation, persistent-block HTTP campaigns and private-to-public reporting |
 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Third-party code, provenance and licenses |
 
 ## Quick start
@@ -48,12 +48,16 @@ server options and the launcher (`serve\fns.py`), and [docs/TESTING.md](docs/TES
 
 ## Reproducible performance campaigns
 
-[FNS-SPEED v1](docs/BENCHMARKING.md) adapts SPEED-Bench to fixed-length, single-turn requests at concurrency 1.
+[FNS-SPEED v2](docs/BENCHMARKING.md) adapts SPEED-Bench to fixed-length, single-turn requests at concurrency 1.
 It compares the same GGUF file between llama-server and FlintNSteel, and separately measures the FNS speculation
-ablation. It is not an official SPEED-Bench score, a task-quality evaluation, or an agent-session benchmark.
-Acquisition requires explicit license consent; data, per-example metadata and raw logs remain local under
-`perso/bench/speed/`. Ordinary tests and serving do not acquire this dataset. The recipe does not imply that
-any campaign has been run or that a speedup has been observed.
+ablation. Execution uses blocks of up to 32 prepared requests, alternating arm order, and one warmup per
+block-arm session: weights stay warm, but each measured request requires a full fresh prefill with cold KV.
+The immutable `protocol-v1.json` still defines acquisition and prepared inputs; `execution-v2.json` defines
+execution. New campaigns do not resume or merge v1 execution results. It is not an official SPEED-Bench score,
+a task-quality evaluation, or an agent-session benchmark. Acquisition requires explicit license consent;
+data, per-example metadata and raw logs remain local under `perso/bench/speed/`. Ordinary tests and serving
+do not acquire this dataset. The recipe does not imply that any campaign has been run or that a speedup has
+been observed.
 
 ## License
 

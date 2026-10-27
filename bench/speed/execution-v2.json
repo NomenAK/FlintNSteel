@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "name": "FNS-SPEED v2",
+  "block_size": 32,
+  "block_order": "config-category-prepared-order",
+  "arm_order": "alternating-block-repetition",
+  "server_lifetime": "block-arm",
+  "warmup": "once-per-session",
+  "cache_prompt": false
+}
