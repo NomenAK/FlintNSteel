@@ -544,18 +544,47 @@ class BlockLifecycleTests(unittest.TestCase):
                 self.assertEqual(len(bench.jsonl(directory / "attempts.jsonl")), 8)
                 self.assertEqual(len(set(state.prefixes)), len(state.prefixes))
 
-    def test_completed_sessions_do_not_hide_missing_session_or_request(self):
-        for remove in ("session", "row"):
-            with self.subTest(remove=remove), tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"TEMP": tmp}):
+    def test_resume_refuses_missing_or_incomplete_successful_session_evidence(self):
+        for damage in ("one_row", "all_rows", "missing_file", "failed_row", "wrong_order"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"TEMP": tmp}):
                 cfg = self.config(tmp)
-                with self.harness(cfg):
-                    directory, _ = bench.run_campaign(cfg, "q3", "service", "greedy")
-                    path = directory / ("sessions.jsonl" if remove == "session" else "attempts.jsonl")
+                with self.harness(cfg) as state:
+                    directory, ok = bench.run_campaign(cfg, "q3", "service", "greedy")
+                    self.assertTrue(ok)
+                    path = directory / "attempts.jsonl"
                     records = bench.jsonl(path)
-                    path.write_bytes(b"".join(bench.canonical(r) + b"\n" for r in records[:-1]))
-                    _, ok = bench.run_campaign(cfg, "q3", "service", "greedy", directory)
-                self.assertTrue(ok)
-                self.assertEqual([r["block_generation"] for r in bench.jsonl(directory / "attempts.jsonl")[-6:]], [1] * 6)
+                    if damage == "one_row":
+                        records.pop(0)
+                    elif damage == "all_rows":
+                        records = records[3:]
+                    elif damage == "missing_file":
+                        path.unlink()
+                    elif damage == "failed_row":
+                        records[0]["status"] = "error"
+                    else:
+                        records[0], records[1] = records[1], records[0]
+                    if damage != "missing_file":
+                        path.write_bytes(b"".join(bench.canonical(r) + b"\n" for r in records))
+                    before_attempts = path.read_bytes() if path.exists() else None
+                    before_sessions = (directory / "sessions.jsonl").read_bytes()
+                    before_servers = len(state.servers)
+                    with self.assertRaisesRegex(BenchError, "successful session lacks complete successful request evidence"):
+                        bench.run_campaign(cfg, "q3", "service", "greedy", directory)
+                    self.assertEqual(len(state.servers), before_servers)
+                    self.assertEqual(path.read_bytes() if path.exists() else None, before_attempts)
+                    self.assertEqual((directory / "sessions.jsonl").read_bytes(), before_sessions)
+
+    def test_missing_session_can_be_resumed(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"TEMP": tmp}):
+            cfg = self.config(tmp)
+            with self.harness(cfg):
+                directory, _ = bench.run_campaign(cfg, "q3", "service", "greedy")
+                path = directory / "sessions.jsonl"
+                records = bench.jsonl(path)
+                path.write_bytes(b"".join(bench.canonical(r) + b"\n" for r in records[:-1]))
+                _, ok = bench.run_campaign(cfg, "q3", "service", "greedy", directory)
+            self.assertTrue(ok)
+            self.assertEqual([r["block_generation"] for r in bench.jsonl(directory / "attempts.jsonl")[-6:]], [1] * 6)
 
     def test_session_only_generation_is_resumed_without_reusing_raw_paths(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"TEMP": tmp}):
@@ -597,6 +626,13 @@ class BlockLifecycleTests(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertTrue(all(r["attempt"] == 2 and r["block_generation"] == 1
                                     for r in bench.jsonl(directory / "attempts.jsonl")[-6:]))
+                path = directory / "attempts.jsonl"
+                rows = bench.jsonl(path)
+                path.write_bytes(b"".join(bench.canonical(row) + b"\n" for row in rows[1:]))
+                before_servers = len(state.servers)
+                with self.assertRaisesRegex(BenchError, "successful session lacks complete successful request evidence"):
+                    bench.run_campaign(cfg, "q3", "speculation", "greedy", directory)
+                self.assertEqual(len(state.servers), before_servers)
 
     def test_start_shutdown_and_monitor_errors_finalize_and_stop(self):
         for failure, code in (("fail_start", "startup"), ("fail_shutdown", "process"), ("fail_monitor", "environment")):

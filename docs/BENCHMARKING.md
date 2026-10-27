@@ -378,8 +378,10 @@ for a seed/repetition: skip only when both latest arm sessions are complete and 
 has valid latest rows in the same generation. Otherwise rerun all requests in both arms with a new block
 generation, including previously successful rows inside that incomplete/failed unit. Preserve old rows,
 session records and raw evidence, with explicit linked attempts; no invisible retry or cross-generation
-cherry-picking. A completed session alone is insufficient if parity has invalidated its request rows.
-Do not resume into a changed selection, budget or configuration. Use a new review directory per export.
+cherry-picking. A completed session alone is insufficient if parity has invalidated its request rows. Resume
+refuses a run if any successful session lacks its complete ordered successful request evidence; restore the
+original evidence rather than silently replacing it. Do not resume into a changed selection, budget or
+configuration. Use a new review directory per export.
 
 There is **no v1 execution/resume/report compatibility**: start a new schema-v2 campaign and run root, do not
 migrate or merge old attempts/sessions, and do not combine v1 and v2 results into one table. Historical code

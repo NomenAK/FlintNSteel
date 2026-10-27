@@ -326,7 +326,7 @@ class StreamSplitter:
         return deltas
 
 
-def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=False):
+def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=False, launch_token=None):
     log_lock = threading.Lock()
     chat_lock = threading.Lock()
     if log_tokens and log is None:
@@ -344,6 +344,8 @@ def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=Fal
         def do_GET(self):
             if self.path == "/v1/models":
                 self.reply(200, {"object": "list", "data": [{"id": model_name, "object": "model"}]})
+            elif self.path == "/health":
+                self.reply(200, {"pid": os.getpid(), "launch_token": launch_token})
             else:
                 self.reply(404, {"error": "Unknown endpoint"})
 
@@ -396,12 +398,41 @@ def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=Fal
                 if max_tokens < 1:
                     raise ValueError("max_tokens must be positive")
                 gen = engine.stream(ids, max_tokens, grammar, sampling, ignore_eos, cache_prompt=cache_prompt)
-                first = next(gen)  # prefill and first token: request errors are raised here
             except (ValueError, TypeError, KeyError, AttributeError, RuntimeError, OverflowError) as e:
                 self.reply(400, {"error": str(e)})
                 return
             cid, created = f"chatcmpl-{uuid.uuid4().hex}", int(time.time())
             stream = bool(req.get("stream"))
+
+            def engine_error(e, headers_sent=False):
+                error = {"error": {"message": str(e), "type": "server_error"}}
+                if log is not None:
+                    with log_lock:
+                        entry = {"t": time.time(), "request_id": request_id, "stream": stream, "error": error["error"]}
+                        log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                        log.flush()
+                if headers_sent:
+                    if not gone:
+                        try:
+                            self.wfile.write(b"data: " + json.dumps(error, ensure_ascii=False).encode() +
+                                             b"\n\ndata: [DONE]\n\n")
+                            self.wfile.flush()
+                        except OSError:
+                            pass
+                else:
+                    self.reply(500, error)
+
+            try:
+                first = next(gen)
+            except json.JSONDecodeError as e:
+                engine_error(e)
+                return
+            except (RuntimeError, ValueError) as e:
+                self.reply(400, {"error": str(e)})
+                return
+            except Exception as e:
+                engine_error(e)
+                return
             gone = []  # client disconnected: cancel generation (fns-serve stops at the next token)
 
             def chunk(delta, finish=None, usage=None):
@@ -426,16 +457,23 @@ def make_handler(chat, engine, model_name, log=None, record=None, log_tokens=Fal
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
-                chunk({"role": "assistant"})
-            for item in itertools.chain([first], gen):
-                if isinstance(item, dict):
-                    info = item
-                    break
-                out.append(item)
+            try:
                 if stream:
-                    for field, text in split.feed(dec.step(chat.tok, item) or ""):
-                        sent[field] += text
-                        chunk({field: text})
+                    chunk({"role": "assistant"})
+                for item in itertools.chain([first], gen):
+                    if isinstance(item, dict):
+                        info = item
+                        break
+                    out.append(item)
+                    if stream:
+                        for field, text in split.feed(dec.step(chat.tok, item) or ""):
+                            sent[field] += text
+                            chunk({field: text})
+            except Exception as e:
+                engine_error(e, headers_sent=stream)
+                return
+            finally:
+                gen.close()
             message, finish = finish_message(chat, out, tools)
             if info.get("reason") == "length":
                 finish = "length"  # budget takes precedence, including when its last token happens to be EOS
@@ -510,6 +548,7 @@ def main() -> None:
     ap.add_argument("--log", help="local per-request JSONL metrics (no generated token IDs by default)")
     ap.add_argument("--log-tokens", action="store_true", help="include private generated token IDs in --log")
     ap.add_argument("--record", help="record each request body (JSONL), for bench/scripts/agent_replay.py")
+    ap.add_argument("--launch-token", help=argparse.SUPPRESS)
     o = ap.parse_args()
     if o.log_tokens and not o.log:
         ap.error("--log-tokens requires --log")
@@ -521,7 +560,8 @@ def main() -> None:
         with (open(o.log, "a", encoding="utf-8") if o.log else contextlib.nullcontext()) as log, \
              (open(o.record, "a", encoding="utf-8") if o.record else contextlib.nullcontext()) as record, \
              ThreadingHTTPServer(("127.0.0.1", o.port),
-                                 make_handler(chat, engine, Path(o.model).stem, log, record, o.log_tokens)) as server:
+                                 make_handler(chat, engine, Path(o.model).stem, log, record, o.log_tokens,
+                                              o.launch_token)) as server:
             print(f"fns_server : http://127.0.0.1:{o.port}/v1", flush=True)
             server.serve_forever()
     finally:

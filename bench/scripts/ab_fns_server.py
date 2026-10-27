@@ -73,7 +73,7 @@ def main() -> None:
                                 "n": o.n, "stderr": p.stderr.strip()[-500:], "avg_ts": row["avg_ts"]}) + "\n")
             print(f"pair {i + 1}/{o.pairs}: llama-server {a_ts[-1]:.2f}, FlintNSteel {b_ts[-1]:.2f} tok/s", flush=True)
     ma, mb = statistics.median(a_ts), statistics.median(b_ts)
-    wins = sum(b > a for a, b in zip(a_ts, b_ts))
+    wins = sum(b > a for a, b in zip(a_ts, b_ts, strict=True))
     print(f"\n{out}\n| tg{o.n} after {len(ids)} | llama-server {ma:.1f} | FlintNSteel {mb:.1f} | x{mb / ma:.3f} | "
           f"{wins}/{o.pairs} |")
 

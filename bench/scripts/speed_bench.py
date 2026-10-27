@@ -305,11 +305,11 @@ def local_chat(cfg):
     import importlib
     fns_server = importlib.import_module("fns_server")
     old_template = fns_server.CHAT_TEMPLATE
-    setattr(fns_server, "CHAT_TEMPLATE", Path(cfg["template"]["path"]))
+    fns_server.CHAT_TEMPLATE = Path(cfg["template"]["path"])  # type: ignore[attr-defined]
     try:
         yield fns_server.Chat(), fns_server.normalize_messages
     finally:
-        setattr(fns_server, "CHAT_TEMPLATE", old_template)
+        fns_server.CHAT_TEMPLATE = old_template  # type: ignore[attr-defined]
         if previous is None:
             os.environ.pop("FNS_TOKENIZER", None)
         else:
@@ -500,7 +500,7 @@ def inspect_machine(cfg):
     else:
         permitted = _desktop_processes(smi, apps, fields, policy)
     result = {"os": platform.platform(), "python": sys.version, "architecture": platform.machine(),
-              "cpu": platform.processor(), "gpu": fields[0], "driver": fields[1], "gpu_state": dict(zip(query.split(","), fields)),
+              "cpu": platform.processor(), "gpu": fields[0], "driver": fields[1], "gpu_state": dict(zip(query.split(","), fields, strict=True)),
               "compute_processes": apps, "declared": cfg["machine"], "gpu_process_policy": policy,
               "permitted_graphics_processes": permitted}
     if os.name == "nt":
@@ -671,7 +671,7 @@ def inspect_live_gpu(cfg, owned_pids=None):
         require(not apps.strip() or apps.strip().lower() == "no running processes found", "Other GPU compute processes present", "environment")
     else:
         records = _desktop_processes(smi, apps, fields, policy, owned_pids or set())
-    return {"gpu_state": dict(zip(query.split(","), fields)), "gpu_processes": records,
+    return {"gpu_state": dict(zip(query.split(","), fields, strict=True)), "gpu_processes": records,
             "owned_pids": sorted(owned_pids or set())}
 
 
@@ -837,6 +837,22 @@ def run_campaign(cfg, quant, comparison, mode, resume=None):
             previous = jsonl(directory / "attempts.jsonl") if (directory / "attempts.jsonl").exists() else []
             sessions = jsonl(directory / "sessions.jsonl") if (directory / "sessions.jsonl").exists() else []
             require(all(r.get("schema_version") == 2 for r in previous + sessions), "Mixed execution schemas")
+            blocks = deterministic_blocks(cfg["requests"], cfg["execution_protocol_data"]["block_size"])
+            for session in sessions:
+                if session.get("status") != "ok":
+                    continue
+                block_id = session.get("block_id")
+                require(type(block_id) is int and 0 <= block_id < len(blocks),
+                        "Successful session has invalid block membership")
+                ids = [request["request_id"] for request in blocks[block_id]]
+                measured = [row for row in previous if row.get("session_id") == session.get("session_id")
+                            and not (row.get("status") == "error" and row.get("error_code") == "spec_parity")]
+                require(session.get("request_ids") == ids
+                        and [row.get("request_id") for row in measured] == ids
+                        and all(row.get("status") == "ok" and all(row.get(key) == session.get(key)
+                                for key in ("block_id", "block_generation", "seed", "pair", "arm"))
+                                for row in measured),
+                        "Cannot resume: successful session lacks complete successful request evidence")
             for name, source in cfg["sources"].items():
                 snapshot = source_snapshot(source, directory / "raw" / (name + "-resume-" + uuid.uuid4().hex + ".zip"))
                 require(snapshot["source_tree_sha256"] == manifest["sources"][name]["source_tree_sha256"],

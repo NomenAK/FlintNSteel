@@ -77,8 +77,8 @@ def main() -> int:
             if form:  # experts: .x1 (one shared row) or .x6 (one row per expert)
                 ncols = w.shape[-1]
                 xs = [x[:ncols]] * 6 if form == ".x1" else [x[j * ncols:(j + 1) * ncols] for j in range(6)]
-                ref_q = np.concatenate([w[e] @ q8_1(xi).astype(np.float64) for e, xi in zip(IDS, xs)])
-                ref_x = np.concatenate([w[e] @ xi.astype(np.float64) for e, xi in zip(IDS, xs)])
+                ref_q = np.concatenate([w[e] @ q8_1(xi).astype(np.float64) for e, xi in zip(IDS, xs, strict=True)])
+                ref_x = np.concatenate([w[e] @ xi.astype(np.float64) for e, xi in zip(IDS, xs, strict=True)])
             else:
                 ncols = w.shape[-1]
                 ref_q = w @ q8_1(x[:ncols]).astype(np.float64)

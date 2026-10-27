@@ -109,7 +109,7 @@ def run_fns(model: str, ctx: int, extra: str, bodies: list, turns: list, log: Pa
                 if line.startswith("fns_server : http"):
                     break
             per, t0 = [], time.perf_counter()
-            for body, (ids, n) in zip(bodies, turns):
+            for body, (ids, n) in zip(bodies, turns, strict=True):
                 t = time.perf_counter()
                 r = post(PORT_FNS, "/v1/chat/completions", {
                     "messages": body["messages"], "tools": body.get("tools"), "max_tokens": n, "ignore_eos": True,
@@ -158,7 +158,7 @@ def main() -> None:
         raise SystemExit(f"{len(bodies)} requests in the trace, {len(logged)} in the journal")
     chat = Chat()
     turns = []
-    for b, g in zip(bodies, logged):
+    for b, g in zip(bodies, logged, strict=True):
         ids = chat.prompt_ids(b["messages"], b.get("tools"))
         if len(ids) != g["prompt_tokens"]:
             raise SystemExit(f"prompt of {len(ids)} tokens, {g['prompt_tokens']} in the journal")
@@ -195,11 +195,11 @@ def main() -> None:
     print(f"\n{out}")
     for a in o.a:
         am = statistics.median(totals[a])
-        wins = sum(b < x for x, b in zip(totals[a], totals["fns"]))
+        wins = sum(b < x for x, b in zip(totals[a], totals["fns"], strict=True))
         print(f"| llama-server {a} | {am:.2f} s | FlintNSteel {fm:.2f} s | x{am / fm:.3f} | {wins}/{o.pairs} |")
     if o.fns_b is not None:
         bm = statistics.median(totals["fns-b"])
-        wins = sum(b < x for x, b in zip(totals["fns"], totals["fns-b"]))
+        wins = sum(b < x for x, b in zip(totals["fns"], totals["fns-b"], strict=True))
         print(f"| fns {o.fns!r} | {fm:.2f} s | fns {o.fns_b!r} | {bm:.2f} s | x{fm / bm:.3f} | {wins}/{o.pairs} |")
 
 

@@ -57,7 +57,7 @@ def main() -> None:
                 f.write(json.dumps({"pair": i, "arm": arm, "exe": cmd[0], "args": cmd[1:], "commit": commit,
                                     "avg_ts": v}) + "\n")
             print(f"pair {i + 1}/{o.pairs}: A {a[-1]:.1f}  B {b[-1]:.1f} tok/s", flush=True)
-    wins = sum(y > x for x, y in zip(a, b))
+    wins = sum(y > x for x, y in zip(a, b, strict=True))
     ma, mb = statistics.median(a), statistics.median(b)
     print(f"\n{out}\n| {' '.join(extra)} | A {ma:.1f} | B {mb:.1f} | x{mb / ma:.3f} | {wins}/{o.pairs} |")
 

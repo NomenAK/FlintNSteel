@@ -8,10 +8,14 @@ prompt-encoding test uses a small in-memory `tokenizers` vocabulary.
 import copy
 import io
 import json
+import os
 import re
+import socket
 import sys
+import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
@@ -22,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "serve"))
 
 from tokenizers import Tokenizer, models, pre_tokenizers  # noqa: E402
 
+import fns  # noqa: E402
 from fns_server import Chat, Engine, StreamSplitter, make_handler, normalize_messages, parse_tool_call  # noqa: E402
 from speed_native_smoke import expected_counters  # noqa: E402
 
@@ -236,6 +241,53 @@ class EngineStreamTests(unittest.TestCase):
         self.assertIsNone(engine.current)
 
 
+class LauncherOwnershipTests(unittest.TestCase):
+    def test_reused_pid_is_stale_and_never_signaled(self):
+        for action in (fns.stop, fns.status, fns.running):
+            with self.subTest(action=action.__name__), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory) / "server.json"
+                state.write_text(json.dumps({"pid": 123, "identity": "old", "launch_token": "token", "port": 8091}),
+                                 encoding="utf-8")
+                with patch.object(fns, "STATE", Path(directory)), patch.object(fns, "process_identity", return_value="new"), \
+                     patch.object(fns, "kill") as kill:
+                    action() if action is fns.running else action(None)
+                    kill.assert_not_called()
+                    self.assertFalse(state.exists())
+
+    def test_matching_identity_is_stopped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "server.json"
+            state.write_text(json.dumps({"pid": 123, "identity": "birth", "launch_token": "token", "port": 8091}),
+                             encoding="utf-8")
+            with patch.object(fns, "STATE", Path(directory)), patch.object(fns, "process_identity", return_value="birth"), \
+                 patch.object(fns, "kill") as kill:
+                self.assertEqual(fns.stop(None), 0)
+                kill.assert_called_once_with(123)
+                self.assertFalse(state.exists())
+
+    def test_unrelated_listener_is_rejected_before_launch(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            options = SimpleNamespace(port=listener.getsockname()[1], quant="q3", ctx=128, timeout=1)
+            with patch.object(fns, "running", return_value=None), patch.object(fns.subprocess, "Popen") as popen:
+                self.assertEqual(fns.serve(options), 1)
+                popen.assert_not_called()
+
+    def test_readiness_requires_launched_pid_and_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            options = SimpleNamespace(port=0, quant="q3", ctx=128, timeout=0.01)
+            proc = SimpleNamespace(pid=123, returncode=None, poll=lambda: None)
+            with patch.object(fns, "STATE", Path(directory)), patch.object(fns, "running", return_value=None), \
+                 patch.object(fns.subprocess, "Popen", return_value=proc), \
+                 patch.object(fns, "process_identity", return_value="birth"), \
+                 patch.object(fns, "health_endpoint", return_value={"pid": 999, "launch_token": "other"}), \
+                 patch.object(fns, "kill") as kill, patch.object(fns.time, "sleep"):
+                self.assertEqual(fns.serve(options), 1)
+                self.assertFalse(fns.state_file().exists())
+                kill.assert_called_once_with(123)
+
+
 class ServiceContractTests(unittest.TestCase):
     """Exercise the HTTP consumer through Engine.stream, including final native metadata and private logging."""
 
@@ -385,6 +437,106 @@ class ServiceContractTests(unittest.TestCase):
             with self.post(ignore_eos=True) as response:
                 result = json.load(response)
         self.assertEqual(result["choices"][0]["finish_reason"], "length")
+
+    def test_native_failure_before_token_returns_request_error(self):
+        class FailedOutput:
+            def readline(self):
+                return json.dumps({"error": "native failed"}) + "\n"
+
+        self.engine.stdout = FailedOutput()
+        for stream in (True, False):
+            with self.subTest(stream=stream):
+                with self.assertRaises(HTTPError) as raised:
+                    self.post(stream=stream)
+                with raised.exception as response:
+                    self.assertEqual(response.code, 400)
+                    self.assertEqual(json.load(response), {"error": "native failed"})
+                self.assertIsNone(self.engine.current)
+                self.assertFalse(self.engine.lock.locked())
+
+    def test_native_eof_before_token_returns_structured_server_error(self):
+        class FailedOutput:
+            def readline(self):
+                return ""
+
+        self.engine.stdout = FailedOutput()
+        for stream in (True, False):
+            with self.subTest(stream=stream):
+                with self.assertRaises(HTTPError) as raised:
+                    self.post(stream=stream)
+                with raised.exception as response:
+                    self.assertEqual(response.code, 500)
+                    error = json.load(response)["error"]
+                self.assertEqual(error["type"], "server_error")
+                self.assertTrue(error["message"])
+                self.assertIsNone(self.engine.current)
+                self.assertFalse(self.engine.lock.locked())
+
+    def test_value_error_before_token_returns_request_error(self):
+        def invalid_stream(*args, **kwargs):
+            yield from ()
+            raise ValueError("invalid request")
+
+        self.engine.stream = invalid_stream
+        with self.assertRaises(HTTPError) as raised:
+            self.post()
+        with raised.exception as response:
+            self.assertEqual(response.code, 400)
+            self.assertEqual(json.load(response), {"error": "invalid request"})
+
+    def test_native_failure_after_token_returns_structured_error(self):
+        for stream in (True, False):
+            for failure in (json.dumps({"error": "native failed"}) + "\n", ""):
+                with self.subTest(stream=stream, failure=failure):
+                    class FailedOutput:
+                        def __init__(self, failure=failure):
+                            self.lines = iter([json.dumps({"token": 2}) + "\n", failure])
+
+                        def readline(self):
+                            return next(self.lines)
+
+                    self.engine.stdout = FailedOutput()
+                    if stream:
+                        with self.post(stream=True) as response:
+                            events = [line[6:].strip() for line in response if line.startswith(b"data: ")]
+                        self.assertEqual(events[-1], b"[DONE]")
+                        error = json.loads(events[-2])["error"]
+                    else:
+                        with self.assertRaises(HTTPError) as raised:
+                            self.post()
+                        with raised.exception as response:
+                            self.assertEqual(response.code, 500)
+                            error = json.load(response)["error"]
+                    self.assertEqual(error["type"], "server_error")
+                    self.assertTrue(error["message"])
+                    self.assertIsNone(self.engine.current)
+                    self.assertFalse(self.engine.lock.locked())
+                    logged = json.loads(self.flushed[-1].splitlines()[-1])
+                    self.assertEqual(logged["error"], error)
+                    self.assertEqual(logged["stream"], stream)
+
+    def test_stream_generator_exception_and_first_token_failure(self):
+        def broken_stream(*args, **kwargs):
+            if kwargs.get("cache_prompt"):
+                yield 2
+            raise BrokenPipeError("engine pipe closed")
+
+        self.engine.stream = broken_stream
+        with self.post(stream=True) as response:
+            events = [line[6:].strip() for line in response if line.startswith(b"data: ")]
+        self.assertEqual(events[-1], b"[DONE]")
+        self.assertEqual(json.loads(events[-2])["error"], {"message": "engine pipe closed", "type": "server_error"})
+        with self.assertRaises(HTTPError) as raised:
+            self.post(stream=True, cache_prompt=False)
+        with raised.exception as response:
+            self.assertEqual(response.code, 500)
+            self.assertEqual(json.load(response)["error"]["type"], "server_error")
+
+    def test_health_identifies_server(self):
+        self.server.RequestHandlerClass = make_handler(self.chat, self.engine, "test", launch_token="launch-123")
+        with urlopen(f"http://127.0.0.1:{self.server.server_port}/health", timeout=5) as response:
+            identity = json.load(response)
+        self.assertEqual(identity, {"pid": os.getpid(), "launch_token": "launch-123"})
 
 
 if __name__ == "__main__":

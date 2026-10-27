@@ -17,9 +17,11 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
+import uuid
 import urllib.request
 from pathlib import Path
 
@@ -47,16 +49,55 @@ def read_state() -> dict | None:
         return None
 
 
-def alive(pid: int) -> bool:
+def process_identity(pid: object) -> str | None:
+    """Return a process birth identity, or None when it cannot be verified."""
+    if type(pid) is not int or pid <= 0:
+        return None
     if sys.platform == "win32":
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], capture_output=True,
-                             text=True).stdout
-        return f'"{pid}"' in out
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetProcessTimes.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+                                          ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+                                          ctypes.POINTER(wintypes.FILETIME))
+        kernel.GetProcessTimes.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+            if not kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                          ctypes.byref(kernel_time), ctypes.byref(user_time)):
+                return None
+            return f"win:{created.dwHighDateTime:08x}{created.dwLowDateTime:08x}"
+        finally:
+            kernel.CloseHandle(handle)
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            start = stat[stat.rindex(")") + 2:].split()[19]
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+            return f"linux:{boot}:{start}"
+        except (OSError, ValueError, IndexError):
+            return None
+    return None
+
+
+def owned_state() -> dict | None:
+    s = read_state()
+    if s is None:
+        return None
+    if (not isinstance(s, dict) or not isinstance(s.get("identity"), str)
+            or not isinstance(s.get("launch_token"), str) or not s["launch_token"]
+            or type(s.get("port")) is not int or not 0 < s["port"] < 65536
+            or process_identity(s.get("pid")) != s["identity"]):
+        state_file().unlink(missing_ok=True)
+        return None
+    return s
 
 
 def models_endpoint(port: int, timeout: float = 2.0) -> dict | None:
@@ -67,9 +108,17 @@ def models_endpoint(port: int, timeout: float = 2.0) -> dict | None:
         return None
 
 
+def health_endpoint(port: int, timeout: float = 2.0) -> dict | None:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=timeout) as r:
+            return json.loads(r.read())
+    except (OSError, ValueError):
+        return None
+
+
 def running() -> dict | None:
-    s = read_state()
-    if s and alive(s["pid"]) and models_endpoint(s["port"]):
+    s = owned_state()
+    if s and health_endpoint(s["port"]) == {"pid": s["pid"], "launch_token": s.get("launch_token")}:
         return s
     return None
 
@@ -149,13 +198,20 @@ def serve(o) -> int:
     if s:
         print(f"already running: pid {s['pid']}, http://127.0.0.1:{s['port']}/v1 ({s['model']})")
         return 0
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", o.port))
+    except OSError as e:
+        print(f"port {o.port} is unavailable: {e}", file=sys.stderr)
+        return 1
     model = MODELS / QUANTS[o.quant]
     if o.quant == "q4" and not Q4_PROFILE.is_file():
         print(f"Q4 profile missing: {Q4_PROFILE}\n"
               "create it with: py -3.14 bench/scripts/route_profile.py profile", file=sys.stderr)
         return 1
+    token = uuid.uuid4().hex
     cmd = [sys.executable, str(ROOT / "serve" / "fns_server.py"), "--model", str(model), "--port", str(o.port),
-           "--ctx", str(o.ctx), "--log", str(STATE / "requests.jsonl")]
+           "--ctx", str(o.ctx), "--log", str(STATE / "requests.jsonl"), "--launch-token", token]
     if o.quant == "q4":  # adaptive expert cache (same bits, x1.045 under agent load)
         cmd += ["--expert-profile", str(Q4_PROFILE), "--rebalance", "64"]
     STATE.mkdir(parents=True, exist_ok=True)
@@ -164,20 +220,26 @@ def serve(o) -> int:
     with log.open("w", encoding="utf-8") as lf:
         proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 creationflags=flags, start_new_session=sys.platform != "win32")
+    identity = process_identity(proc.pid)
+    if identity is None:
+        proc.terminate()
+        print("cannot verify server process identity", file=sys.stderr)
+        return 1
     t0 = time.time()
     while time.time() - t0 < o.timeout:
         if proc.poll() is not None:
             print(f"fns_server stopped (code {proc.returncode}), see {log}", file=sys.stderr)
             return 1
-        if models_endpoint(o.port, 1.0):
-            st = {"pid": proc.pid, "port": o.port, "model": str(model), "quant": o.quant, "ctx": o.ctx,
-                  "started": time.time(), "log": str(log)}
+        if health_endpoint(o.port, 1.0) == {"pid": proc.pid, "launch_token": token}:
+            st = {"pid": proc.pid, "identity": identity, "launch_token": token, "port": o.port,
+                  "model": str(model), "quant": o.quant, "ctx": o.ctx, "started": time.time(), "log": str(log)}
             state_file().write_text(json.dumps(st), encoding="utf-8")
             print(f"ready in {time.time() - t0:.1f} s: http://127.0.0.1:{o.port}/v1 ({model.name}, pid {proc.pid})")
             return 0
         time.sleep(0.5)
     print(f"not ready after {o.timeout} s, see {log}", file=sys.stderr)
-    kill(proc.pid)
+    if proc.poll() is None and process_identity(proc.pid) == identity:
+        kill(proc.pid)
     return 1
 
 
@@ -189,23 +251,23 @@ def kill(pid: int) -> None:
 
 
 def status(o) -> int:
-    s = read_state()
+    s = owned_state()
     if not s:
         print("no server started by fns serve")
         return 1
-    up = alive(s["pid"])
-    m = models_endpoint(s["port"]) if up else None
-    print(f"pid {s['pid']} ({'alive' if up else 'stopped'}), http://127.0.0.1:{s['port']}/v1, {Path(s['model']).name}, "
+    health = health_endpoint(s["port"])
+    m = models_endpoint(s["port"]) if health == {"pid": s["pid"], "launch_token": s.get("launch_token")} else None
+    print(f"pid {s['pid']}, http://127.0.0.1:{s['port']}/v1, {Path(s['model']).name}, "
           f"context {s['ctx']}" + (f", models {[d['id'] for d in m['data']]}" if m else ", /v1/models no response"))
     return 0 if m else 1
 
 
 def stop(o) -> int:
-    s = read_state()
+    s = owned_state()
     if not s:
         print("no server started by fns serve")
         return 0
-    if alive(s["pid"]):
+    if process_identity(s["pid"]) == s["identity"]:
         kill(s["pid"])
     state_file().unlink(missing_ok=True)
     print(f"stopped (pid {s['pid']})")

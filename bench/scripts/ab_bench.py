@@ -33,7 +33,7 @@ def gpu_state() -> dict:
     out = subprocess.run(
         ["nvidia-smi", f"--query-gpu={q}", "--format=csv,noheader,nounits"], capture_output=True, text=True
     ).stdout.strip()
-    return dict(zip(q.split(","), (v.strip() for v in out.split(","))))
+    return dict(zip(q.split(","), (v.strip() for v in out.split(",")), strict=False))
 
 
 def run(args: str) -> list[dict]:
@@ -83,7 +83,7 @@ def main() -> None:
     for t, a in samples["A"].items():
         if "B" in samples:
             b = samples["B"][t]
-            wins = sum(y > x for x, y in zip(a, b))
+            wins = sum(y > x for x, y in zip(a, b, strict=True))
             ma, mb = statistics.median(a), statistics.median(b)
             print(f"| {t} | {ma:.1f} | {mb:.1f} | {mb / ma:.3f} | {wins}/{len(a)} |")
         else:

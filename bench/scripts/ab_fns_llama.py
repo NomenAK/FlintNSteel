@@ -72,7 +72,7 @@ def main() -> None:
             b.append(rb["avg_ts"])
             f.write(json.dumps({"pair": i, "arm": "B-fns", "cmd": b_cmd, "commits": commits, "avg_ts": rb["avg_ts"]}) + "\n")
             print(f"pair {i + 1}/{o.pairs}: llama {a[-1]:.1f}  fns {b[-1]:.1f} tok/s", flush=True)
-    wins = sum(y > x for x, y in zip(a, b))
+    wins = sum(y > x for x, y in zip(a, b, strict=True))
     ma, mb = statistics.median(a), statistics.median(b)
     label = f"pp{p}" if p else f"tg{n}"
     print(f"\n{out}\n| {label} @ d{o.depth} | llama.cpp {ma:.1f} | FlintNSteel {mb:.1f} | x{mb / ma:.3f} | {wins}/{o.pairs} |")

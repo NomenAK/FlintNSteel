@@ -54,9 +54,11 @@ The OpenAI-compatible server is `serve/fns_server.py`. By default it starts `FNS
 py -3.14 serve\fns_server.py --model models\flint-UD-Q3_K_XL.gguf --port 8080 --ctx 32768
 ```
 
-Endpoints: `GET /v1/models` and `POST /v1/chat/completions` (`"stream": true` for server-sent events). Any other path
-returns 404. The chat template is `serve/chat_template.jinja`. Tool calls are constrained by a grammar compiled by xgrammar,
-and responses include `reasoning_content`. Requests are served one at a time.
+Endpoints: `GET /v1/models`, `GET /health` (server PID and launcher token), and `POST /v1/chat/completions`
+(`"stream": true` for server-sent events). Any other path returns 404. An engine failure after streaming starts emits
+an `error` event followed by `[DONE]`; before response headers it returns HTTP 500 with an `error` object. The chat
+template is `serve/chat_template.jinja`. Tool calls are constrained by a grammar compiled by xgrammar, and responses
+include `reasoning_content`. Requests are served one at a time.
 
 Server options (`serve/fns_server.py`):
 
@@ -123,6 +125,9 @@ Use the same supported option set when comparing tools. `fns-ref` and `fns-bench
 `serve/fns.py` wraps the checks and the server. Its default port is `8091`. It writes its state to
 `FNS_STATE\server.json` (default `%LOCALAPPDATA%\FlintNSteel`), its server log to `FNS_STATE\server.log` and its request
 log to `FNS_STATE\requests.jsonl`.
+
+The launcher refuses an occupied port, verifies the launched server's identity before reporting readiness, and discards
+stale state without signaling a process whose identity no longer matches. Old state files without identity are stale.
 
 ```powershell
 py -3.14 serve\fns.py doctor                   # GPU, driver, VRAM, executables, models, Python, pi
@@ -205,7 +210,8 @@ These scripts need caller-supplied inputs. They have no default trace, model or 
   up to 32 prepared requests per block arm, with one warmup per session and alternating A/B order between
   block repetitions. Weights stay warm; every measured request uses cold KV (`cache_prompt=false`) and full
   prefill. Session startup/warmup/shutdown are accounted once, outside request latency. Resume replaces an
-  incomplete block pair in full, not individual successful rows. Do not resume or merge v1 execution artifacts.
+  incomplete block pair in full, not individual successful rows, but refuses missing or incomplete request
+  evidence for any successful session. Do not resume or merge v1 execution artifacts.
   See [BENCHMARKING.md](BENCHMARKING.md) for the acquisition/check/run/report
   recipe, dependencies, privacy boundary and interpretation limits. This is not an agent trace or an official
   SPEED-Bench score.

@@ -147,7 +147,7 @@ def main() -> None:
         a = d["A"]
         if "B" in d:
             b = d["B"]
-            wins = sum(y > x for x, y in zip(a, b))
+            wins = sum(y > x for x, y in zip(a, b, strict=True))
             print(f"| {name} | {statistics.median(a):.2f} | {statistics.median(b):.2f} | "
                   f"{statistics.median(b) / statistics.median(a):.3f} | {wins}/{len(a)} |")
         else:

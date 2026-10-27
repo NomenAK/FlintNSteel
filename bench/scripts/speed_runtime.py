@@ -137,7 +137,7 @@ class StreamCapture:
                 "tpot_client_ms": (last - first) * 1000 / (self.max_tokens - 1)
                 if first is not None and self.max_tokens > 1 else None,
                 "visible_null_reason": None if first is not None else "no_nonempty_delta",
-                "delta_intervals_ms": [(b - a) * 1000 for a, b in zip(self.visible, self.visible[1:])],
+                "delta_intervals_ms": [(b - a) * 1000 for a, b in zip(self.visible, self.visible[1:], strict=False)],
                 "completion_tokens": self.max_tokens, "prompt_tokens": self.prompt_tokens,
                 "finish_reason": self.finish}
 
@@ -264,12 +264,12 @@ class OwnedServer:
             if not kernel.SetInformationJobObject(self.job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
                 raise BenchError("process", "Cannot enable owned-child kill-on-close")
             self.proc = subprocess.Popen(self.argv, creationflags=0x00000004 | 0x00000200, **kwargs)
-            if not kernel.AssignProcessToJobObject(self.job, int(getattr(self.proc, "_handle"))):
+            if not kernel.AssignProcessToJobObject(self.job, int(self.proc._handle)):  # type: ignore[attr-defined]
                 raise BenchError("process", "Cannot own process tree through Windows job")
             self.assigned = True
             ntdll = ctypes.WinDLL("ntdll")
             ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
-            if ntdll.NtResumeProcess(int(getattr(self.proc, "_handle"))) != 0:
+            if ntdll.NtResumeProcess(int(self.proc._handle)) != 0:  # type: ignore[attr-defined]
                 raise BenchError("process", "Cannot resume owned process")
         else:
             self.proc = subprocess.Popen(self.argv, start_new_session=True, **kwargs)
@@ -331,7 +331,7 @@ class OwnedServer:
                     time.sleep(0.05)
             elif self.proc is not None:
                 try:
-                    getattr(os, "killpg")(self.proc.pid, signal.SIGTERM)
+                    os.killpg(self.proc.pid, signal.SIGTERM)  # type: ignore[attr-defined]
                     self.proc.wait(timeout=self.shutdown_timeout)
                 except ProcessLookupError:
                     pass
@@ -339,7 +339,7 @@ class OwnedServer:
                     pass
                 finally:
                     try:
-                        getattr(os, "killpg")(self.proc.pid, getattr(signal, "SIGKILL"))
+                        os.killpg(self.proc.pid, signal.SIGKILL)  # type: ignore[attr-defined]
                     except ProcessLookupError:
                         pass
                     self.proc.wait(timeout=self.shutdown_timeout)
@@ -453,7 +453,7 @@ class GPUStateSampler:
                 values = record["values"]
                 if len(values) != len(self.FIELDS):
                     continue
-                parsed = dict(zip(self.FIELDS, values))
+                parsed = dict(zip(self.FIELDS, values, strict=True))
                 numbers = {key: float(value) for key, value in parsed.items() if key != "pstate"}
                 if not all(math.isfinite(n) and n >= 0 for n in numbers.values()):
                     continue
