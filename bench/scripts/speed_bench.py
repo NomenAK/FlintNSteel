@@ -452,11 +452,12 @@ def _desktop_processes(smi, apps, fields, policy, owned_pids: set[int] | frozens
             require(kind in ("C", "C+G"), "Unknown owned GPU process type", "environment")
             _graphics_path(path)
         elif policy["mode"] == "strict":
-            require(kind == "G", "Other GPU compute or unknown process type", "environment")
+            require(kind == "G", f"Other GPU compute or unknown process type: {kind} {path} (pid {pid})", "environment")
             _graphics_path(path)
         else:
-            require(kind in ("G", "C+G"), "Pure compute or unknown GPU process type", "environment")
-            require(_graphics_path(path) in allowed, "Unlisted GPU graphical process", "environment")
+            require(kind in ("G", "C+G"), f"Pure compute or unknown GPU process type: {kind} {path} (pid {pid})",
+                    "environment")
+            require(_graphics_path(path) in allowed, f"Unlisted GPU graphical process: {path} (pid {pid})", "environment")
         record = {"pid": int(pid), "path": path, "type": kind}
         records.append(record)
         by_pid[int(pid)] = record
@@ -676,9 +677,11 @@ def inspect_live_gpu(cfg, owned_pids=None):
 
 
 def wait_for_idle(cfg):
-    deadline = time.perf_counter() + 30 * 60
+    start = time.perf_counter()
+    deadline = start + 30 * 60
     stable_since = None
     last_error = None
+    last_report = start
     while time.perf_counter() < deadline:
         try:
             inspect_live_gpu(cfg)
@@ -692,7 +695,12 @@ def wait_for_idle(cfg):
             if exc.code != "environment":
                 raise
             stable_since, last_error = None, exc
-            time.sleep(min(10, max(0, deadline - time.perf_counter())))
+            now = time.perf_counter()
+            if now - last_report >= 30:
+                print(f"speed_bench: waiting for idle GPU ({now - start:.0f} s of {deadline - start:.0f} s): {exc}",
+                      file=sys.stderr, flush=True)
+                last_report = now
+            time.sleep(min(10, max(0, deadline - now)))
     raise BenchError("environment", "Idle/cooldown deadline exceeded: " + str(last_error or "GPU did not remain idle"))
 
 
@@ -948,8 +956,12 @@ def check_campaign(cfg):
     results = {"schema_version": 2, "campaign_sha256": cfg["campaign_sha256"],
                "requests": len(cfg["requests"]), "status": "error"}
     try:
+        print(f"speed_bench check: verifying {len(cfg['requests'])} prepared requests against the FNS template",
+              file=sys.stderr, flush=True)
         results["warmup_prompt_tokens"] = verify_local_inputs(cfg)
         for quant in ("q3", "q4"):
+            print(f"speed_bench check: {quant} llama-server template/token parity (waits for an idle GPU)",
+                  file=sys.stderr, flush=True)
             verify_llama_inputs(cfg, quant, directory)
         results["status"] = "ok"
     except BaseException as exc:
@@ -983,6 +995,8 @@ def main(argv=None):
             from speed_report import generate_report
             generate_report(args.run_dir, args.out)
             return 0
+        if args.command in ("check", "run"):
+            print("speed_bench: validating campaign and hashing artifacts", file=sys.stderr, flush=True)
         cfg = validate_campaign(args.campaign)
         if args.command == "check":
             print(check_campaign(cfg))
