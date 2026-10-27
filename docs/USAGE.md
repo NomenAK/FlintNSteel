@@ -84,8 +84,8 @@ Server options (`serve/fns_server.py`):
 
 `--spec` takes 2 to 8, and `0` disables it. `--spec-sample` may explicitly disable sampled speculation with `0`
 or select a width from 2 through `--spec`. Omitting it preserves the native automatic setting `min(2, --spec)`.
-`--spec-adapt` is opt-in and adjusts the draft width per request using previous verification outcomes; it produces
-the same tokens and requires `--spec` to be enabled. It also works with the native `fns-serve` binary.
+`--spec-adapt` is opt-in and chooses the draft width per iteration from request-local acceptance and runtime-measured
+costs, with periodic probes; it produces the same tokens, requires `--spec`, and also works with native `fns-serve`.
 For a fixed benchmark configuration, pass both values explicitly; do not change ordinary serving defaults.
 
 ### Request cache control and private diagnostics

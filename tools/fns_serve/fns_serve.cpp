@@ -35,7 +35,8 @@
 // speculation for the same seed (bit-identical logits, same sampler, same counter). Without a draft: one step.
 // Window width is --spec for greedy and --spec-sample for sampling (default min(2, --spec); 0: no speculation when
 // sampling).
-// --spec-adapt is opt-in: adjusts draft width from prior committed verification outcomes, with periodic probes.
+// --spec-adapt is opt-in: chooses draft width from committed acceptance and runtime-measured costs, with probes;
+// its decision thresholds are derived from those costs rather than fixed acceptance thresholds.
 // Presence penalty: column c counts d[0 .. c) as already seen, and only committed choices are marked
 // (Engine::presence_commit): same state as sequential decoding, same tokens.
 #include "fns/lookup.h"
@@ -263,6 +264,8 @@ int run(int argc, char ** argv) {
                      opt.n_ctx, opt.ubatch, ring, has_grammar ? "yes" : "no", spec);
         emit(std::string("{\"ready\": true, \"grammar\": ") + (has_grammar ? "true" : "false") + "}");
         std::vector<int32_t> ctx;  // tokens whose KV is in the cache, positions 0 .. ctx.size() - 1
+        // Process-wide wall-time EWMAs; unmeasured widths use ratio priors until their first observation.
+        double spec_cost[9] = {};
         Input input;
         std::thread reader([&] { input.run(); });
         reader.detach();  // blocked in getline; the process exits with main
@@ -406,11 +409,9 @@ int run(int argc, char ** argv) {
                     int32_t last = end_choice();
                     t1 = std::chrono::steady_clock::now();
                     std::vector<int32_t> ids(spec), out(spec), d(spec);
-                    // Unmeasured heuristics: below half accepted shrinks, at least three quarters grows; two
-                    // zero-accept windows trigger sequential steps with doubling backoff (capped at 64).
-                    // A successful probe resets the backoff; all state is local to this request.
-                    int adapt_limit = (sp.temperature <= 0.0f ? spec : spec_sample) - 1;
-                    int zero_windows = 0, backoff = 0, backoff_size = 1;
+                    // Acceptance is request-local; cost EWMAs persist across requests for this engine.
+                    uint64_t adapt_accepted = 0, adapt_offered = 0;
+                    int skipped_proposals = 0;
                     auto commit = [&](int32_t t) {  // emits t; returns true if generation stops
                         emit("{\"token\": " + std::to_string(t) + "}");
                         ++generated;
@@ -426,24 +427,55 @@ int run(int argc, char ** argv) {
                         const int width = sp.temperature <= 0.0f ? spec : spec_sample;
                         const int room = std::min(width - 1, max_tokens - generated);
                         int nd = room > 0 ? fns::lookup_draft(ctx, room, d.data()) : 0;
-                        if (spec_adapt) {
-                            if (backoff > 0) {
-                                --backoff;
-                                if (nd > 0) ++skipped;
-                                nd = 0;
-                            } else {
-                                nd = std::min(nd, adapt_limit);
+                        if (spec_adapt && nd > 0) {
+                            const int nd_max = nd;
+                            const double a = (double) (adapt_accepted + 1) / (double) (adapt_offered + 2);
+                            // If no sequential cost has been observed, infer its scale from a measured width.
+                            // With no measurements at all, the scale cancels out of the prior ratios.
+                            double t1_cost = spec_cost[1];
+                            if (t1_cost == 0.0) {
+                                for (int w = 2; w <= spec; ++w) {
+                                    if (spec_cost[w] > 0.0) {
+                                        t1_cost = spec_cost[w] / (1.0 + 0.25 * (w - 1));
+                                        break;
+                                    }
+                                }
+                                if (t1_cost == 0.0) t1_cost = 1.0;
                             }
+                            int best = 0;
+                            double best_score = 1.0, expected = 1.0, power = 1.0;
+                            for (int n = 1; n <= nd_max; ++n) {
+                                power *= a;
+                                expected += power;
+                                const double cost = spec_cost[n + 1] > 0.0
+                                    ? spec_cost[n + 1] / t1_cost : 1.0 + 0.25 * n;
+                                const double score = expected / cost;
+                                if (score > best_score) { best_score = score; best = n; }
+                            }
+                            if (best == 0 && skipped_proposals >= 16) best = 1;
+                            nd = best;
+                            if (nd == 0) { ++skipped; ++skipped_proposals; }
+                            else skipped_proposals = 0;
                         }
+                        std::chrono::steady_clock::time_point verify_start;
+                        if (spec_adapt && nd > 0) verify_start = std::chrono::steady_clock::now();
                         const int W = nd > 0 ? window_masks(d.data(), nd) : 1;
                         nd = W - 1;
                         const int p0 = (int) ctx.size() - 1;
                         if constexpr (std::is_same_v<Engine, fns::Engine>) engine.maybe_rebalance(1);
                         ++iterations;  // a no-draft step or one verification call
                         if (nd == 0) {
+                            std::chrono::steady_clock::time_point step_start;
+                            if (spec_adapt) step_start = std::chrono::steady_clock::now();
                             engine.step_logits(last, p0);
                             begin_choice();
                             last = end_choice();
+                            if (spec_adapt) {
+                                const double elapsed = std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - step_start).count();
+                                if (elapsed > 0.0) spec_cost[1] = spec_cost[1] > 0.0
+                                    ? spec_cost[1] * 0.875 + elapsed * 0.125 : elapsed;
+                            }
                             done = commit(last);
                             continue;
                         }
@@ -456,7 +488,7 @@ int run(int argc, char ** argv) {
                         drafted += nd;
                         // Column c: choice after ids[0 .. c]. Valid while the previous inputs were committed.
                         int engaged = 0;
-                        int window_accepted = 0;
+                        int window_accepted = 0, window_offered = 0;
                         for (int c = 0; c < W && !done; ++c) {
                             const int32_t t = out[c];
 #ifdef FNS_WITH_XGRAMMAR
@@ -467,23 +499,20 @@ int run(int argc, char ** argv) {
                             ++draw;
                             ++engaged;
                             ++spec_emitted;
-                            if (c < nd && t == d[c]) { ++accepted; ++window_accepted; }  // includes a stopping token
+                            if (c < nd) {
+                                ++window_offered;
+                                if (t == d[c]) { ++accepted; ++window_accepted; }  // includes a stopping token
+                            }
                             done = commit(t);
                             if (c == nd || t != d[c]) break;  // next column was computed on another token
                         }
                         if (spec_adapt) {
-                            if (window_accepted * 2 < nd) adapt_limit = std::max(1, adapt_limit - 1);
-                            else if (window_accepted * 4 >= nd * 3) adapt_limit = std::min(width - 1, adapt_limit + 1);
-                            if (window_accepted == 0) {
-                                if (++zero_windows >= 2) {
-                                    backoff = backoff_size;
-                                    backoff_size = std::min(backoff_size * 2, 64);
-                                    zero_windows = 1;  // a failed probe starts the next backoff
-                                }
-                            } else {
-                                zero_windows = 0;
-                                backoff_size = 1;
-                            }
+                            adapt_accepted += window_accepted;
+                            adapt_offered += window_offered;
+                            const double elapsed = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - verify_start).count();
+                            if (elapsed > 0.0) spec_cost[W] = spec_cost[W] > 0.0
+                                ? spec_cost[W] * 0.875 + elapsed * 0.125 : elapsed;
                         }
                         if (sp.presence_penalty != 0.0f) engine.presence_commit(engaged);
                         engine.maybe_rebalance(engaged - 1);
